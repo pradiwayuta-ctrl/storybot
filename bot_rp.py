@@ -1,5 +1,6 @@
 import os
 import re
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 from google import genai
@@ -28,7 +29,7 @@ Tugasmu:
 """
 
 # ---------------------------------------------------------
-# 2. STATE ROOM MEMORY (IN-MEMORY)
+# 2. STATE ROOM MEMORY
 # ---------------------------------------------------------
 rooms = {}
 
@@ -42,15 +43,38 @@ def get_room(chat_id):
             "current_turn_index": 0,       # Indeks player aktif
             "round_actions": [],           # Buffer aksi 1 ronde
             "history": [],                 # Log narasi cerita
-            "lobby_msg_id": None           # ID pesan lobby untuk unpin
+            "lobby_msg_id": None,          # ID pesan lobby untuk unpin
+            "timer_task": None             # Task background untuk AFK timer
         }
     return rooms[chat_id]
 
 # ---------------------------------------------------------
-# 3. HELPER FUNCTIONS & TURN MANAGER
+# 3. HELPER FUNCTIONS, TIMEOUT & TURN MANAGER
 # ---------------------------------------------------------
+def cancel_afk_timer(room):
+    """Membatalkan timer AFK jika player merespons tepat waktu."""
+    if room["timer_task"] and not room["timer_task"].done():
+        room["timer_task"].cancel()
+        room["timer_task"] = None
+
+async def start_afk_timer(client, chat_id, user_id, timeout=120):
+    """Timer otomatis 2 menit (120 detik) untuk auto-skip jika AFK."""
+    await asyncio.sleep(timeout)
+    room = get_room(chat_id)
+    
+    if room["status"] == "PLAYING":
+        active_user_id = room["turn_order"][room["current_turn_index"]]
+        if active_user_id == user_id:
+            skipped_player_name = room["players"][user_id]
+            room["round_actions"].append(f"- {skipped_player_name}: (Waktu habis / auto-skip AFK)")
+            await client.send_message(chat_id, f"⏰ **Waktu habis!** Giliran **{skipped_player_name}** otomatis dilewati (auto-skip).")
+            
+            room["current_turn_index"] += 1
+            await prompt_next_turn(client, chat_id)
+
 async def prompt_next_turn(client, chat_id):
     room = get_room(chat_id)
+    cancel_afk_timer(room)
     
     # Jika semua player di ronde ini sudah aksi -> Generate Gemini!
     if room["current_turn_index"] >= len(room["turn_order"]):
@@ -64,15 +88,20 @@ async def prompt_next_turn(client, chat_id):
         chat_id,
         f"🎯 **Giliran:** [{player_name}](tg://user?id={current_user_id})\n"
         f"Ketik dialog/aksi kamu di grup ini.\n"
-        f"*(Ketik `/skip` jika pemain sedang off/lama)*"
+        f"*(Waktu: 2 Menit | Ketik `/skip` jika ingin melewati)*"
     )
+    
+    # Jalankan background timer 2 menit
+    room["timer_task"] = asyncio.create_task(start_afk_timer(client, chat_id, current_user_id, timeout=120))
 
 async def process_end_of_round(client, chat_id):
     room = get_room(chat_id)
+    cancel_afk_timer(room)
+    
     await client.send_message(chat_id, "⏳ **Semua pemain selesai bertindak.** Narator sedang merangkai alur...")
 
     combined_actions = "\n".join(room["round_actions"])
-    recent_context = "\n".join(room["history"][-3:]) # Sliding window 3 cerita terakhir
+    recent_context = "\n".join(room["history"][-3:])
     
     prompt_round = (
         f"Riwayat Cerita Sebelumnya:\n{recent_context}\n\n"
@@ -93,7 +122,6 @@ async def process_end_of_round(client, chat_id):
     narasi_baru = response.text
     room["history"].append(f"[NARATOR]: {narasi_baru}")
     
-    # Reset buffer ronde & kembalikan antrean giliran ke player pertama
     room["round_actions"].clear()
     room["current_turn_index"] = 0
     
@@ -101,10 +129,35 @@ async def process_end_of_round(client, chat_id):
     await prompt_next_turn(client, chat_id)
 
 # ---------------------------------------------------------
-# 4. BOT HANDLERS & COMMANDS
+# 4. HANDLER START (PRIVATE CHAT & GROUP)
 # ---------------------------------------------------------
 
-@app.on_message(filters.command("start_rp") & filters.group)
+@app.on_message(filters.command(["start", "help"]) & filters.private)
+async def start_private(client, message: Message):
+    bot_user = await client.get_me()
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📖 Rules", callback_data="show_rules_pc"),
+            InlineKeyboardButton("⚡ Fitur & Format", callback_data="show_features_pc")
+        ],
+        [
+            InlineKeyboardButton("➕ Tambahkan Bot ke Grup", url=f"https://t.me/{bot_user.username}?startgroup=true")
+        ]
+    ])
+    
+    text = (
+        f"👋 **Halo {message.from_user.first_name}!**\n\n"
+        f"Saya adalah **Bot GM Narator Roleplay** berbasis Gemini AI.\n\n"
+        f"📌 **Cara Menggunakan Bot:**\n"
+        f"1. Tambahkan bot ini ke dalam **Grup Telegram** kamu.\n"
+        f"2. Berikan hak akses **Admin** (terutama izin *Pin Messages*).\n"
+        f"3. Ketik perintah `/start_rp` di grup untuk membuka Dashboard Game.\n\n"
+        f"Klik tombol di bawah untuk melihat **Rules** atau **Fitur & Format**!"
+    )
+    await message.reply(text, reply_markup=keyboard)
+
+
+@app.on_message(filters.command(["start_rp", "start"]) & filters.group)
 async def start_rp_lobby(client, message: Message):
     room = get_room(message.chat.id)
     if room["status"] != "IDLE":
@@ -117,26 +170,125 @@ async def start_rp_lobby(client, message: Message):
     room["round_actions"].clear()
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Join RP ⚔️", callback_data="join_rp"), InlineKeyboardButton("Leave 🚪", callback_data="leave_rp")],
-        [InlineKeyboardButton("Mulai Cerita 🚀", callback_data="start_story")]
+        [
+            InlineKeyboardButton("Join RP ⚔️", callback_data="join_rp"), 
+            InlineKeyboardButton("Leave 🚪", callback_data="leave_rp")
+        ],
+        [
+            InlineKeyboardButton("📖 Rules", callback_data="show_rules"), 
+            InlineKeyboardButton("⚡ Fitur & Format", callback_data="show_features")
+        ],
+        [
+            InlineKeyboardButton("Mulai Cerita 🚀", callback_data="start_story")
+        ]
     ])
     
-    lobby_msg = await message.reply(
-        f"🎭 **Sesi RP Dibuka!**\n"
-        f"Tema: **{room['theme']}** (Ubah pakai `/tema <nama tema>`)\n\n"
-        f"**Format Pesan:**\n"
-        f"• Dialog: `\"isi dialog\"` \n"
-        f"• Aksi: `;isi aksi;`\n\n"
-        f"Klik tombol di bawah untuk bergabung (nama yang dipakai adalah nama depan Telegram kamu).",
-        reply_markup=keyboard
+    welcome_text = (
+        f"✨ **DASHBOARD ROLEPLAY** ✨\n\n"
+        f"Sesi Roleplay (RP) baru telah dibuka!\n"
+        f"• Tema saat ini: **{room['theme']}** *(Ubah via `/tema <nama tema>`)*\n\n"
+        f"Silakan klik **Join RP** untuk bergabung (menggunakan nama depan Telegram kamu)."
     )
     
-    # AUTO PIN PESAN LOBBY
+    lobby_msg = await message.reply(welcome_text, reply_markup=keyboard)
+    
     try:
         await lobby_msg.pin(disable_notification=False)
         room["lobby_msg_id"] = lobby_msg.id
     except Exception:
         pass
+
+# ---------------------------------------------------------
+# 5. CALLBACK BUTTON HANDLERS
+# ---------------------------------------------------------
+
+@app.on_callback_query(filters.regex("^(show_rules|show_features|back_to_dashboard|show_rules_pc|show_features_pc|back_to_pc)$"))
+async def handle_info_buttons(client, callback: CallbackQuery):
+    data = callback.data
+
+    if data == "show_rules_pc":
+        rules_text = (
+            "📖 **ATURAN PERMAINAN (RULES)**\n\n"
+            "1. **Antrean Giliran (Turn-Based):** Bertindaklah HANYA saat giliran kamu dipanggil bot.\n"
+            "2. **AFK Timer (2 Menit):** Giliran otomatis di-skip jika diam selama 2 menit.\n"
+            "3. **Nama Karakter:** Menggunakan Nama Depan (first_name) akun Telegram.\n"
+            "4. **Format RP:** Gunakan `\"dialog\"` dan `;aksi;`."
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali", callback_data="back_to_pc")]])
+        await callback.message.edit_text(rules_text, reply_markup=keyboard)
+
+    elif data == "show_features_pc":
+        features_text = (
+            "⚡ **FITUR & FORMAT PESAN**\n\n"
+            "📌 **Format Aksi Pemain:**\n"
+            "• Dialog: `\"Halo, siapa di sana?\"`\n"
+            "• Aksi: `;menarik pedang dari sarungnya;`\n"
+            "• Kombo: `\"Tunggu aku!\" ;berlari menyusul Ken;`\n\n"
+            "🛠️ **Daftar Perintah Grup:**\n"
+            "• `/start_rp` - Buka Lobby Baru\n"
+            "• `/tema <nama>` - Ubah tema cerita\n"
+            "• `/skip` - Lewati giliran manual\n"
+            "• `/selesai_rp` - Akhiri permainan"
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali", callback_data="back_to_pc")]])
+        await callback.message.edit_text(features_text, reply_markup=keyboard)
+
+    elif data == "back_to_pc":
+        bot_user = await client.get_me()
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📖 Rules", callback_data="show_rules_pc"),
+                InlineKeyboardButton("⚡ Fitur & Format", callback_data="show_features_pc")
+            ],
+            [
+                InlineKeyboardButton("➕ Tambahkan Bot ke Grup", url=f"https://t.me/{bot_user.username}?startgroup=true")
+            ]
+        ])
+        text = (
+            f"👋 **Halo {callback.from_user.first_name}!**\n\n"
+            f"Saya adalah **Bot GM Narator Roleplay** berbasis Gemini AI.\n\n"
+            f"Klik tombol di bawah untuk informasi selengkapnya atau langsung tambahkan saya ke grup!"
+        )
+        await callback.message.edit_text(text, reply_markup=keyboard)
+
+    elif data == "show_rules":
+        rules_text = (
+            "📖 **ATURAN PERMAINAN (RULES)**\n\n"
+            "1. Bertindaklah HANYA saat giliran nama kamu dipanggil bot.\n"
+            "2. Batas waktu per giliran adalah 2 menit (auto-skip jika AFK).\n"
+            "3. Menggunakan Nama Depan Telegram."
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali ke Dashboard", callback_data="back_to_dashboard")]])
+        await callback.message.edit_text(rules_text, reply_markup=keyboard)
+
+    elif data == "show_features":
+        features_text = (
+            "⚡ **FORMAT PESAN:**\n"
+            "• Dialog: `\"isi dialog\"` \n"
+            "• Aksi: `;isi aksi;`\n"
+            "• Kombo: `\"dialog\" ;aksi;`"
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali ke Dashboard", callback_data="back_to_dashboard")]])
+        await callback.message.edit_text(features_text, reply_markup=keyboard)
+
+    elif data == "back_to_dashboard":
+        room = get_room(callback.message.chat.id)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Join RP ⚔️", callback_data="join_rp"), InlineKeyboardButton("Leave 🚪", callback_data="leave_rp")],
+            [InlineKeyboardButton("📖 Rules", callback_data="show_rules"), InlineKeyboardButton("⚡ Fitur & Format", callback_data="show_features")],
+            [InlineKeyboardButton("Mulai Cerita 🚀", callback_data="start_story")]
+        ])
+        welcome_text = (
+            f"✨ **DASHBOARD ROLEPLAY** ✨\n\n"
+            f"Sesi Roleplay (RP) baru telah dibuka!\n"
+            f"• Tema saat ini: **{room['theme']}** *(Ubah via `/tema <nama tema>`)*\n\n"
+            f"Silakan klik **Join RP** untuk bergabung."
+        )
+        await callback.message.edit_text(welcome_text, reply_markup=keyboard)
+
+# ---------------------------------------------------------
+# 6. COMMAND & GAME HANDLERS
+# ---------------------------------------------------------
 
 @app.on_message(filters.command("tema") & filters.group)
 async def set_theme(client, message: Message):
@@ -146,7 +298,7 @@ async def set_theme(client, message: Message):
         return
 
     if len(message.command) < 2:
-        await message.reply("Contoh penggunaan: `/tema Mafia Sicily` atau `/tema Isekai School`")
+        await message.reply("Contoh: `/tema Mafia Sicily`")
         return
 
     new_theme = " ".join(message.command[1:])
@@ -170,10 +322,9 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
 
     elif callback.data == "start_story":
         if len(room["players"]) < 1:
-            await callback.answer("Minimal harus ada 1 pemain!", show_alert=True)
+            await callback.answer("Minimal 1 pemain!", show_alert=True)
             return
 
-        # AUTO UNPIN PESAN LOBBY
         if room["lobby_msg_id"]:
             try:
                 await client.unpin_chat_message(chat_id, room["lobby_msg_id"])
@@ -209,7 +360,7 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
         await callback.message.reply(f"📜 **[AWAL CERITA]**\n\n{narasi_awal}")
         await prompt_next_turn(client, chat_id)
 
-@app.on_message(filters.group & filters.text & ~filters.command(["start_rp", "selesai_rp", "skip", "tema"]))
+@app.on_message(filters.group & filters.text & ~filters.command(["start_rp", "start", "selesai_rp", "skip", "tema"]))
 async def handle_turn_action(client, message: Message):
     chat_id = message.chat.id
     room = get_room(chat_id)
@@ -219,11 +370,14 @@ async def handle_turn_action(client, message: Message):
 
     active_user_id = room["turn_order"][room["current_turn_index"]]
     if message.from_user.id != active_user_id:
-        return # Abaikan jika bukan gilirannya
+        return
 
     text = message.text
     if not ('"' in text or ';' in text):
         return
+
+    # Batalkan timer AFK karena pemain sudah bertindak!
+    cancel_afk_timer(room)
 
     player_name = room["players"][message.from_user.id]
     
@@ -250,6 +404,8 @@ async def skip_turn(client, message: Message):
     if room["status"] != "PLAYING":
         return
 
+    cancel_afk_timer(room)
+
     active_user_id = room["turn_order"][room["current_turn_index"]]
     skipped_player_name = room["players"][active_user_id]
     
@@ -265,6 +421,8 @@ async def stop_rp(client, message: Message):
     if room["status"] == "IDLE":
         await message.reply("Tidak ada sesi RP yang aktif.")
         return
+
+    cancel_afk_timer(room)
 
     room["status"] = "IDLE"
     room["players"].clear()

@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 from google import genai
 from google.genai import types
@@ -18,14 +19,21 @@ if not all([GEMINI_API_KEY, API_ID, API_HASH, BOT_TOKEN]):
     raise ValueError("Pastikan semua Environment Variables (GEMINI_API_KEY, TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_API_KEY) sudah diisi!")
 
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
-app = Client("rp_narrator_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client(
+    "rp_narrator_bot", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    bot_token=BOT_TOKEN,
+    parse_mode=ParseMode.HTML  # Menggunakan HTML agar format teks tebal/miring rapi di Telegram
+)
 
 SYSTEM_INSTRUCTION = """
-Kamu adalah Narator (Game Master) RP teks interaktif.
+Kamu adalah Game Master (GM) dan Narator utama dalam game Roleplay (RP) teks interaktif.
 Tugasmu:
 1. Terima gabungan aksi dari semua pemain dalam 1 ronde.
 2. Buatkan narasi balasan MAKSIMAL 2 kalimat padat yang merangkum hasil/dampak dari gabungan aksi para pemain tersebut dan memperbarui situasi konflik.
-3. Hanya sebut nama pemain yang terdaftar.
+3. Gunakan gaya bahasa naratif RPG yang immersif dan dramatis.
+4. Hanya sebut nama pemain yang terdaftar.
 """
 
 # ---------------------------------------------------------
@@ -67,7 +75,10 @@ async def start_afk_timer(client, chat_id, user_id, timeout=120):
         if active_user_id == user_id:
             skipped_player_name = room["players"][user_id]
             room["round_actions"].append(f"- {skipped_player_name}: (Waktu habis / auto-skip AFK)")
-            await client.send_message(chat_id, f"⏰ **Waktu habis!** Giliran **{skipped_player_name}** otomatis dilewati (auto-skip).")
+            await client.send_message(
+                chat_id, 
+                f"⌛ <b>Waktu Habis!</b> Giliran <b>{skipped_player_name}</b> di-skip otomatis oleh Game Master."
+            )
             
             room["current_turn_index"] += 1
             await prompt_next_turn(client, chat_id)
@@ -76,7 +87,7 @@ async def prompt_next_turn(client, chat_id):
     room = get_room(chat_id)
     cancel_afk_timer(room)
     
-    # Jika semua player di ronde ini sudah aksi -> Generate Gemini!
+    # Jika semua player di ronde ini sudah aksi -> Generate Narasi GM!
     if room["current_turn_index"] >= len(room["turn_order"]):
         await process_end_of_round(client, chat_id)
         return
@@ -86,19 +97,18 @@ async def prompt_next_turn(client, chat_id):
     
     await client.send_message(
         chat_id,
-        f"🎯 **Giliran:** [{player_name}](tg://user?id={current_user_id})\n"
+        f"🎯 <b>GILIRAN PLAYER:</b> <a href=\"tg://user?id={current_user_id}\">{player_name}</a>\n\n"
         f"Ketik dialog/aksi kamu di grup ini.\n"
-        f"*(Waktu: 2 Menit | Ketik `/skip` jika ingin melewati)*"
+        f"<i>(Batas Waktu: 2 Menit | Ketik /skip untuk melewati)</i>"
     )
     
-    # Jalankan background timer 2 menit
     room["timer_task"] = asyncio.create_task(start_afk_timer(client, chat_id, current_user_id, timeout=120))
 
 async def process_end_of_round(client, chat_id):
     room = get_room(chat_id)
     cancel_afk_timer(room)
     
-    await client.send_message(chat_id, "⏳ **Semua pemain selesai bertindak.** Narator sedang merangkai alur...")
+    await client.send_message(chat_id, "🎲 <b>[RONDE SELESAI]</b> <i>Game Master sedang memproses aksi seluruh pemain...</i>")
 
     combined_actions = "\n".join(room["round_actions"])
     recent_context = "\n".join(room["history"][-3:])
@@ -106,7 +116,7 @@ async def process_end_of_round(client, chat_id):
     prompt_round = (
         f"Riwayat Cerita Sebelumnya:\n{recent_context}\n\n"
         f"Aksi Pemain Ronde Ini:\n{combined_actions}\n\n"
-        f"Sebagai Narator, berikan narasi balasan (max 2 kalimat) atas seluruh aksi pemain di atas."
+        f"Sebagai Game Master, berikan narasi balasan (max 2 kalimat) atas seluruh aksi pemain di atas."
     )
 
     response = ai_client.models.generate_content(
@@ -125,7 +135,7 @@ async def process_end_of_round(client, chat_id):
     room["round_actions"].clear()
     room["current_turn_index"] = 0
     
-    await client.send_message(chat_id, f"📜 **[NARASI ROUND]**\n\n{narasi_baru}")
+    await client.send_message(chat_id, f"📜 <b>[NARASI GAME MASTER]</b>\n\n{narasi_baru}")
     await prompt_next_turn(client, chat_id)
 
 # ---------------------------------------------------------
@@ -137,22 +147,23 @@ async def start_private(client, message: Message):
     bot_user = await client.get_me()
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📖 Rules", callback_data="show_rules_pc"),
-            InlineKeyboardButton("⚡ Fitur & Format", callback_data="show_features_pc")
+            InlineKeyboardButton("📖 Rules Permainan", callback_data="show_rules_pc"),
+            InlineKeyboardButton("⚡ Panduan Aksi", callback_data="show_features_pc")
         ],
         [
-            InlineKeyboardButton("➕ Tambahkan Bot ke Grup", url=f"https://t.me/{bot_user.username}?startgroup=true")
+            InlineKeyboardButton("⚔️ Masukkan GM ke Grup", url=f"https://t.me/{bot_user.username}?startgroup=true")
         ]
     ])
     
     text = (
-        f"👋 **Halo {message.from_user.first_name}!**\n\n"
-        f"Saya adalah **Bot GM Narator Roleplay** berbasis Gemini AI.\n\n"
-        f"📌 **Cara Menggunakan Bot:**\n"
-        f"1. Tambahkan bot ini ke dalam **Grup Telegram** kamu.\n"
-        f"2. Berikan hak akses **Admin** (terutama izin *Pin Messages*).\n"
-        f"3. Ketik perintah `/start_rp` di grup untuk membuka Dashboard Game.\n\n"
-        f"Klik tombol di bawah untuk melihat **Rules** atau **Fitur & Format**!"
+        f"🛡️ <b>GAME MASTER ROLEPLAY BOT</b> 🛡️\n\n"
+        f"Selamat datang, <b>{message.from_user.first_name}</b>!\n"
+        f"Sistem ini bertindak sebagai Game Master otomatis untuk memimpin jalannya alur cerita Roleplay di grup kamu.\n\n"
+        f"<b>Cara Memulai Game:</b>\n"
+        f"1. Tambahkan bot ini ke <b>Grup Telegram</b> kamu.\n"
+        f"2. Berikan akses <b>Admin</b> (terutama izin <i>Pin Messages</i>).\n"
+        f"3. Ketik perintah <code>/start_rp</code> di grup untuk membuka Arena Pendaftaran.\n\n"
+        f"Pilih menu di bawah untuk melihat aturan dan cara input aksi!"
     )
     await message.reply(text, reply_markup=keyboard)
 
@@ -161,7 +172,7 @@ async def start_private(client, message: Message):
 async def start_rp_lobby(client, message: Message):
     room = get_room(message.chat.id)
     if room["status"] != "IDLE":
-        await message.reply("Sesi RP sedang berjalan atau dalam lobby.")
+        await message.reply("⚠️ Sesi petualangan sedang berlangsung atau dalam ruang pendaftaran.")
         return
 
     room["status"] = "LOBBY"
@@ -171,23 +182,23 @@ async def start_rp_lobby(client, message: Message):
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("Join RP ⚔️", callback_data="join_rp"), 
-            InlineKeyboardButton("Leave 🚪", callback_data="leave_rp")
+            InlineKeyboardButton("⚔️ Join Game", callback_data="join_rp"), 
+            InlineKeyboardButton("🚪 Leave", callback_data="leave_rp")
         ],
         [
             InlineKeyboardButton("📖 Rules", callback_data="show_rules"), 
-            InlineKeyboardButton("⚡ Fitur & Format", callback_data="show_features")
+            InlineKeyboardButton("⚡ Panduan Aksi", callback_data="show_features")
         ],
         [
-            InlineKeyboardButton("Mulai Cerita 🚀", callback_data="start_story")
+            InlineKeyboardButton("🚀 Mulai Petualangan", callback_data="start_story")
         ]
     ])
     
     welcome_text = (
-        f"✨ **DASHBOARD ROLEPLAY** ✨\n\n"
-        f"Sesi Roleplay (RP) baru telah dibuka!\n"
-        f"• Tema saat ini: **{room['theme']}** *(Ubah via `/tema <nama tema>`)*\n\n"
-        f"Silakan klik **Join RP** untuk bergabung (menggunakan nama depan Telegram kamu)."
+        f"🏛️ <b>ARENA PENDAFTARAN PETUALANGAN</b> 🏛️\n\n"
+        f"Pintu petualangan baru telah dibuka!\n"
+        f"• Tema Saat Ini: <b>{room['theme']}</b> <i>(Ganti via <code>/tema nama_tema</code>)</i>\n\n"
+        f"Tekan tombol <b>Join Game</b> untuk mendaftarkan karakter kamu!"
     )
     
     lobby_msg = await message.reply(welcome_text, reply_markup=keyboard)
@@ -208,27 +219,27 @@ async def handle_info_buttons(client, callback: CallbackQuery):
 
     if data == "show_rules_pc":
         rules_text = (
-            "📖 **ATURAN PERMAINAN (RULES)**\n\n"
-            "1. **Antrean Giliran (Turn-Based):** Bertindaklah HANYA saat giliran kamu dipanggil bot.\n"
-            "2. **AFK Timer (2 Menit):** Giliran otomatis di-skip jika diam selama 2 menit.\n"
-            "3. **Nama Karakter:** Menggunakan Nama Depan (first_name) akun Telegram.\n"
-            "4. **Format RP:** Gunakan `\"dialog\"` dan `;aksi;`."
+            "📜 <b>ATURAN PERMAINAN (GAME RULES)</b>\n\n"
+            "1. <b>Sistem Giliran (Turn-Based):</b> Pemain HANYA boleh bertindak saat nama karakternya dipanggil oleh GM.\n"
+            "2. <b>Batas Waktu (AFK Timer):</b> Pemain memiliki waktu 2 menit per giliran. Jika melebihi batas, giliran akan di-skip otomatis.\n"
+            "3. <b>Identitas Karakter:</b> Game Master menggunakan Nama Depan Telegram kamu sebagai nama resmi karakter dalam narasi.\n"
+            "4. <b>Format Bertindak:</b> Wajib menggunakan simbol dialog <code>\"...\"</code> atau aksi <code>;...;</code>."
         )
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali", callback_data="back_to_pc")]])
         await callback.message.edit_text(rules_text, reply_markup=keyboard)
 
     elif data == "show_features_pc":
         features_text = (
-            "⚡ **FITUR & FORMAT PESAN**\n\n"
-            "📌 **Format Aksi Pemain:**\n"
-            "• Dialog: `\"Halo, siapa di sana?\"`\n"
-            "• Aksi: `;menarik pedang dari sarungnya;`\n"
-            "• Kombo: `\"Tunggu aku!\" ;berlari menyusul Ken;`\n\n"
-            "🛠️ **Daftar Perintah Grup:**\n"
-            "• `/start_rp` - Buka Lobby Baru\n"
-            "• `/tema <nama>` - Ubah tema cerita\n"
-            "• `/skip` - Lewati giliran manual\n"
-            "• `/selesai_rp` - Akhiri permainan"
+            "⚡ <b>PANDUAN FORMAT AKSI & PERINTAH</b>\n\n"
+            "🎯 <b>Cara Mengirim Aksi di Grup:</b>\n"
+            "• <b>Bicara / Dialog:</b> <code>\"Siapa yang berani melangkah ke depan?\"</code>\n"
+            "• <b>Gerakan / Aksi:</b> <code>;mengangkat pedang dan bersiap bertarung;</code>\n"
+            "• <b>Kombo:</b> <code>\"Maju bersama!\" ;mendorong pintu gerbang;</code>\n\n"
+            "🛠️ <b>Perintah Utama (Commands):</b>\n"
+            "• <code>/start_rp</code> - Buka Arena Pendaftaran di grup\n"
+            "• <code>/tema [nama]</code> - Ganti tema cerita saat di Lobby\n"
+            "• <code>/skip</code> - Lewati giliran pemain yang terhambat\n"
+            "• <code>/selesai_rp</code> - Akhiri sesi petualangan"
         )
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali", callback_data="back_to_pc")]])
         await callback.message.edit_text(features_text, reply_markup=keyboard)
@@ -237,52 +248,52 @@ async def handle_info_buttons(client, callback: CallbackQuery):
         bot_user = await client.get_me()
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("📖 Rules", callback_data="show_rules_pc"),
-                InlineKeyboardButton("⚡ Fitur & Format", callback_data="show_features_pc")
+                InlineKeyboardButton("📖 Rules Permainan", callback_data="show_rules_pc"),
+                InlineKeyboardButton("⚡ Panduan Aksi", callback_data="show_features_pc")
             ],
             [
-                InlineKeyboardButton("➕ Tambahkan Bot ke Grup", url=f"https://t.me/{bot_user.username}?startgroup=true")
+                InlineKeyboardButton("⚔️ Masukkan GM ke Grup", url=f"https://t.me/{bot_user.username}?startgroup=true")
             ]
         ])
         text = (
-            f"👋 **Halo {callback.from_user.first_name}!**\n\n"
-            f"Saya adalah **Bot GM Narator Roleplay** berbasis Gemini AI.\n\n"
-            f"Klik tombol di bawah untuk informasi selengkapnya atau langsung tambahkan saya ke grup!"
+            f"🛡️ <b>GAME MASTER ROLEPLAY BOT</b> 🛡️\n\n"
+            f"Selamat datang, <b>{callback.from_user.first_name}</b>!\n"
+            f"Pilih menu di bawah untuk melihat penjelasan sistem permainan."
         )
         await callback.message.edit_text(text, reply_markup=keyboard)
 
     elif data == "show_rules":
         rules_text = (
-            "📖 **ATURAN PERMAINAN (RULES)**\n\n"
-            "1. Bertindaklah HANYA saat giliran nama kamu dipanggil bot.\n"
-            "2. Batas waktu per giliran adalah 2 menit (auto-skip jika AFK).\n"
-            "3. Menggunakan Nama Depan Telegram."
+            "📜 <b>ATURAN PERMAINAN (GAME RULES)</b>\n\n"
+            "1. Bertindak HANYA saat giliran nama kamu dipanggil oleh Game Master.\n"
+            "2. Waktu merespons adalah 2 menit per pemain (auto-skip jika AFK).\n"
+            "3. Karakter menggunakan nama depan akun Telegram kamu."
         )
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali ke Dashboard", callback_data="back_to_dashboard")]])
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali ke Arena", callback_data="back_to_dashboard")]])
         await callback.message.edit_text(rules_text, reply_markup=keyboard)
 
     elif data == "show_features":
         features_text = (
-            "⚡ **FORMAT PESAN:**\n"
-            "• Dialog: `\"isi dialog\"` \n"
-            "• Aksi: `;isi aksi;`\n"
-            "• Kombo: `\"dialog\" ;aksi;`"
+            "⚡ <b>FORMAT INPUT AKSI:</b>\n\n"
+            "• <b>Dialog:</b> <code>\"isi ucapan\"</code>\n"
+            "• <b>Aksi:</b> <code>;isi tindakan;</code>\n"
+            "• <b>Kombo:</b> <code>\"isi ucapan\" ;isi tindakan;</code>"
         )
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali ke Dashboard", callback_data="back_to_dashboard")]])
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali ke Arena", callback_data="back_to_dashboard")]])
         await callback.message.edit_text(features_text, reply_markup=keyboard)
 
     elif data == "back_to_dashboard":
         room = get_room(callback.message.chat.id)
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Join RP ⚔️", callback_data="join_rp"), InlineKeyboardButton("Leave 🚪", callback_data="leave_rp")],
-            [InlineKeyboardButton("📖 Rules", callback_data="show_rules"), InlineKeyboardButton("⚡ Fitur & Format", callback_data="show_features")],
-            [InlineKeyboardButton("Mulai Cerita 🚀", callback_data="start_story")]
+            [InlineKeyboardButton("⚔️ Join Game", callback_data="join_rp"), InlineKeyboardButton("🚪 Leave", callback_data="leave_rp")],
+            [InlineKeyboardButton("📖 Rules", callback_data="show_rules"), InlineKeyboardButton("⚡ Panduan Aksi", callback_data="show_features")],
+            [InlineKeyboardButton("🚀 Mulai Petualangan", callback_data="start_story")]
         ])
         welcome_text = (
-            f"✨ **DASHBOARD ROLEPLAY** ✨\n\n"
-            f"Sesi Roleplay (RP) baru telah dibuka!\n"
-            f"• Tema saat ini: **{room['theme']}** *(Ubah via `/tema <nama tema>`)*\n\n"
-            f"Silakan klik **Join RP** untuk bergabung."
+            f"🏛️ <b>ARENA PENDAFTARAN PETUALANGAN</b> 🏛️\n\n"
+            f"Pintu petualangan baru telah dibuka!\n"
+            f"• Tema Saat Ini: <b>{room['theme']}</b>\n\n"
+            f"Tekan tombol <b>Join Game</b> untuk mendaftarkan karakter kamu!"
         )
         await callback.message.edit_text(welcome_text, reply_markup=keyboard)
 
@@ -294,16 +305,16 @@ async def handle_info_buttons(client, callback: CallbackQuery):
 async def set_theme(client, message: Message):
     room = get_room(message.chat.id)
     if room["status"] != "LOBBY":
-        await message.reply("Tema hanya bisa diubah saat masih di Lobby!")
+        await message.reply("⚠️ Tema cerita hanya dapat diubah saat berada di Arena Pendaftaran (Lobby)!")
         return
 
     if len(message.command) < 2:
-        await message.reply("Contoh: `/tema Mafia Sicily`")
+        await message.reply("Contoh: <code>/tema Mafia Sicily</code> atau <code>/tema Kerajaan Cyberpunk</code>")
         return
 
     new_theme = " ".join(message.command[1:])
     room["theme"] = new_theme
-    await message.reply(f"🎨 Tema cerita diubah menjadi: **{new_theme}**")
+    await message.reply(f"🎨 <b>Tema Petualangan Diubah:</b> <code>{new_theme}</code>")
 
 @app.on_callback_query(filters.regex("^(join_rp|leave_rp|start_story)$"))
 async def handle_lobby_buttons(client, callback: CallbackQuery):
@@ -313,16 +324,16 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
 
     if callback.data == "join_rp":
         room["players"][user.id] = user.first_name
-        await callback.answer(f"Kamu bergabung sebagai {user.first_name}!", show_alert=False)
+        await callback.answer(f"Karakter {user.first_name} terdaftar!", show_alert=False)
         
     elif callback.data == "leave_rp":
         if user.id in room["players"]:
             del room["players"][user.id]
-            await callback.answer("Kamu keluar dari lobby.", show_alert=False)
+            await callback.answer("Kamu keluar dari pendaftaran.", show_alert=False)
 
     elif callback.data == "start_story":
         if len(room["players"]) < 1:
-            await callback.answer("Minimal 1 pemain!", show_alert=True)
+            await callback.answer("Minimal harus ada 1 pemain yang terdaftar!", show_alert=True)
             return
 
         if room["lobby_msg_id"]:
@@ -335,7 +346,7 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
         room["turn_order"] = list(room["players"].keys())
         room["current_turn_index"] = 0
 
-        await callback.message.edit_text("⏳ **Narator sedang menyusun takdir awal...**")
+        await callback.message.edit_text("🎲 <b>[GAME MASTER]</b> <i>Sedang merangkai takdir dan pembukaan dunia...</i>")
         
         player_names = ", ".join(room["players"].values())
         prompt_pembuka = (
@@ -357,7 +368,7 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
         narasi_awal = response.text
         room["history"].append(f"[NARATOR]: {narasi_awal}")
         
-        await callback.message.reply(f"📜 **[AWAL CERITA]**\n\n{narasi_awal}")
+        await callback.message.reply(f"📜 <b>[AWAL PETUALANGAN]</b>\n\n{narasi_awal}")
         await prompt_next_turn(client, chat_id)
 
 @app.on_message(filters.group & filters.text & ~filters.command(["start_rp", "start", "selesai_rp", "skip", "tema"]))
@@ -376,7 +387,6 @@ async def handle_turn_action(client, message: Message):
     if not ('"' in text or ';' in text):
         return
 
-    # Batalkan timer AFK karena pemain sudah bertindak!
     cancel_afk_timer(room)
 
     player_name = room["players"][message.from_user.id]
@@ -391,7 +401,7 @@ async def handle_turn_action(client, message: Message):
     formatted_action = f"- {player_name}: " + " ".join(parsed_parts)
     
     room["round_actions"].append(formatted_action)
-    await message.reply(f"✅ Aksi **{player_name}** dicatat!")
+    await message.reply(f"⚔️ Aksi <b>{player_name}</b> terrekam oleh Game Master!")
     
     room["current_turn_index"] += 1
     await prompt_next_turn(client, chat_id)
@@ -410,7 +420,7 @@ async def skip_turn(client, message: Message):
     skipped_player_name = room["players"][active_user_id]
     
     room["round_actions"].append(f"- {skipped_player_name}: (Tidak bertindak / di-skip)")
-    await message.reply(f"⏭️ Giliran **{skipped_player_name}** dilewati!")
+    await message.reply(f"⏭️ Giliran <b>{skipped_player_name}</b> dilewati!")
     
     room["current_turn_index"] += 1
     await prompt_next_turn(client, chat_id)
@@ -419,7 +429,7 @@ async def skip_turn(client, message: Message):
 async def stop_rp(client, message: Message):
     room = get_room(message.chat.id)
     if room["status"] == "IDLE":
-        await message.reply("Tidak ada sesi RP yang aktif.")
+        await message.reply("⚠️ Tidak ada petualangan yang sedang aktif saat ini.")
         return
 
     cancel_afk_timer(room)
@@ -428,7 +438,7 @@ async def stop_rp(client, message: Message):
     room["players"].clear()
     room["history"].clear()
     room["round_actions"].clear()
-    await message.reply("🏁 **Sesi Roleplay telah berakhir.** Terima kasih sudah bermain!")
+    await message.reply("🏆 <b>[PETUALANGAN SELESAI]</b> Sesi permaianan telah diakhiri. Sampai jumpa di petualangan berikutnya!")
 
 if __name__ == "__main__":
     app.run()

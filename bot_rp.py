@@ -58,16 +58,43 @@ def get_room(chat_id):
     return rooms[chat_id]
 
 # ---------------------------------------------------------
-# 3. HELPER FUNCTIONS, TIMEOUT & TURN MANAGER
+# 3. HELPER AI WITH RETRY (Mencegah Error 503)
+# ---------------------------------------------------------
+async def generate_ai_with_retry(prompt, system_instruction, max_tokens=150):
+    models_to_try = ["gemini-3.8-flash", "gemini-2.0-flash"]
+    
+    for model_name in models_to_try:
+        for attempt in range(3):
+            try:
+                response = ai_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        max_output_tokens=max_tokens,
+                        temperature=0.7
+                    )
+                )
+                if response and response.text:
+                    return response.text
+            except Exception as e:
+                err_msg = str(e)
+                if "503" in err_msg or "UNAVAILABLE" in err_msg or "high demand" in err_msg:
+                    await asyncio.sleep(2)
+                    continue
+                else:
+                    raise e
+    raise Exception("Server AI sedang sangat sibuk. Silakan coba sebentar lagi.")
+
+# ---------------------------------------------------------
+# 4. HELPER FUNCTIONS & TURN MANAGER
 # ---------------------------------------------------------
 def cancel_afk_timer(room):
-    """Membatalkan timer AFK jika player merespons tepat waktu."""
     if room["timer_task"] and not room["timer_task"].done():
         room["timer_task"].cancel()
         room["timer_task"] = None
 
 async def start_afk_timer(client, chat_id, user_id, timeout=120):
-    """Timer otomatis 2 menit untuk auto-skip jika AFK."""
     await asyncio.sleep(timeout)
     room = get_room(chat_id)
     
@@ -120,16 +147,8 @@ async def process_end_of_round(client, chat_id):
     )
 
     try:
-        response = ai_client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt_round,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                max_output_tokens=100,
-                temperature=0.7
-            )
-        )
-        narasi_baru = html.escape(response.text)
+        raw_text = await generate_ai_with_retry(prompt_round, SYSTEM_INSTRUCTION, max_tokens=100)
+        narasi_baru = html.escape(raw_text)
         room["history"].append(f"[NARATOR]: {narasi_baru}")
         
         room["round_actions"].clear()
@@ -140,15 +159,17 @@ async def process_end_of_round(client, chat_id):
 
     except Exception as e:
         print(f"Error Generate Round: {e}")
-        await status_msg.edit_text(f"⚠️ <b>Gagal memproses narasi:</b> <code>{html.escape(str(e))}</code>\n\nKetik /skip atau coba lagi.")
+        await status_msg.edit_text(f"⚠️ <b>Gagal memproses narasi:</b> <code>{html.escape(str(e))}</code>\n\nKetik /skip untuk melewatinya.")
 
 # ---------------------------------------------------------
-# 4. HANDLER START (PRIVATE CHAT & GROUP)
+# 5. HANDLER CHAT PRIBADI (PC)
 # ---------------------------------------------------------
 
-@app.on_message(filters.command(["start", "help"]) & filters.private)
+@app.on_message(filters.private)
 async def start_private(client, message: Message):
     bot_user = await client.get_me()
+    first_name = html.escape(message.from_user.first_name or "Petualang")
+    
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📖 Rules Permainan", callback_data="show_rules_pc"),
@@ -161,7 +182,7 @@ async def start_private(client, message: Message):
     
     text = (
         f"🛡️ <b>GAME MASTER ROLEPLAY BOT</b>\n\n"
-        f"Selamat datang, <b>{html.escape(message.from_user.first_name)}</b>!\n"
+        f"Selamat datang, <b>{first_name}</b>!\n"
         f"Sistem ini bertindak sebagai Game Master otomatis untuk memimpin alur cerita Roleplay di grup kamu.\n\n"
         f"<b>Cara Memulai Game:</b>\n"
         f"1. Tambahkan bot ini ke <b>Grup Telegram</b> kamu.\n"
@@ -171,6 +192,9 @@ async def start_private(client, message: Message):
     )
     await message.reply(text, reply_markup=keyboard)
 
+# ---------------------------------------------------------
+# 6. HANDLER GROUP & LOBBY
+# ---------------------------------------------------------
 
 @app.on_message(filters.command(["start_rp", "start"]) & filters.group)
 async def start_rp_lobby(client, message: Message):
@@ -214,7 +238,7 @@ async def start_rp_lobby(client, message: Message):
         pass
 
 # ---------------------------------------------------------
-# 5. CALLBACK BUTTON HANDLERS
+# 7. CALLBACK BUTTON HANDLERS
 # ---------------------------------------------------------
 
 @app.on_callback_query(filters.regex("^(show_rules|show_features|back_to_dashboard|show_rules_pc|show_features_pc|back_to_pc)$"))
@@ -250,6 +274,7 @@ async def handle_info_buttons(client, callback: CallbackQuery):
 
     elif data == "back_to_pc":
         bot_user = await client.get_me()
+        first_name = html.escape(callback.from_user.first_name or "Petualang")
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("📖 Rules Permainan", callback_data="show_rules_pc"),
@@ -261,7 +286,7 @@ async def handle_info_buttons(client, callback: CallbackQuery):
         ])
         text = (
             f"🛡️ <b>GAME MASTER ROLEPLAY BOT</b>\n\n"
-            f"Selamat datang, <b>{html.escape(callback.from_user.first_name)}</b>!\n"
+            f"Selamat datang, <b>{first_name}</b>!\n"
             f"Pilih menu di bawah untuk melihat penjelasan sistem permainan."
         )
         await callback.message.edit_text(text, reply_markup=keyboard)
@@ -302,7 +327,7 @@ async def handle_info_buttons(client, callback: CallbackQuery):
         await callback.message.edit_text(welcome_text, reply_markup=keyboard)
 
 # ---------------------------------------------------------
-# 6. COMMAND & GAME HANDLERS
+# 8. COMMAND & GAME HANDLERS
 # ---------------------------------------------------------
 
 @app.on_message(filters.command("tema") & filters.group)
@@ -340,6 +365,13 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
             await callback.answer("Minimal harus ada 1 pemain yang terdaftar!", show_alert=True)
             return
 
+        # Keyboard cadangan jika terjadi error pemanggilan API
+        lobby_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚔️ Join Game", callback_data="join_rp"), InlineKeyboardButton("🚪 Leave", callback_data="leave_rp")],
+            [InlineKeyboardButton("📖 Rules", callback_data="show_rules"), InlineKeyboardButton("⚡ Panduan Aksi", callback_data="show_features")],
+            [InlineKeyboardButton("🚀 Mulai Petualangan", callback_data="start_story")]
+        ])
+
         if room["lobby_msg_id"]:
             try:
                 await client.unpin_chat_message(chat_id, room["lobby_msg_id"])
@@ -360,16 +392,8 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
         )
 
         try:
-            response = ai_client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=prompt_pembuka,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION,
-                    max_output_tokens=150,
-                    temperature=0.7
-                )
-            )
-            narasi_awal = html.escape(response.text)
+            raw_text = await generate_ai_with_retry(prompt_pembuka, SYSTEM_INSTRUCTION, max_tokens=150)
+            narasi_awal = html.escape(raw_text)
             room["history"].append(f"[NARATOR]: {narasi_awal}")
             
             await callback.message.reply(f"📜 <b>[AWAL PETUALANGAN]</b>\n\n{narasi_awal}")
@@ -377,8 +401,15 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
             
         except Exception as e:
             print(f"Error Start Story: {e}")
-            room["status"] = "LOBBY" # kembalikan ke status lobby jika error
-            await status_msg.edit_text(f"⚠️ <b>Gagal membuat alur cerita:</b> <code>{html.escape(str(e))}</code>\n\nSilakan coba klik 'Mulai Petualangan' lagi.")
+            room["status"] = "LOBBY"
+            
+            error_text = (
+                f"🏛️ <b>ARENA PENDAFTARAN PETUALANGAN</b>\n\n"
+                f"⚠️ <b>Server AI sedang sibuk sementara.</b>\n"
+                f"Silakan klik tombol <b>Mulai Petualangan</b> di bawah ini sekali lagi."
+            )
+            # Tombol pendaftaran TETAP DITAMPILKAN saat pesan error diedit!
+            await status_msg.edit_text(error_text, reply_markup=lobby_keyboard)
 
 @app.on_message(filters.group & filters.text & ~filters.command(["start_rp", "start", "selesai_rp", "skip", "tema"]))
 async def handle_turn_action(client, message: Message):

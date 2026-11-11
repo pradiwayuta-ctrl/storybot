@@ -41,8 +41,8 @@ Tugasmu:
 4. Hanya sebut nama pemain yang terdaftar.
 """
 
-# Model Llama 3.3 70B di Groq (Pintar, Cepat & Gratis)
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# Model Groq Llama 3.1 8B Instant (Super Cepat, Stabil & Gratis)
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 # ---------------------------------------------------------
 # 2. STATE ROOM MEMORY

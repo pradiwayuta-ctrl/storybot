@@ -120,7 +120,7 @@ async def process_end_of_round(client, chat_id):
     )
 
     response = ai_client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-2.0-flash",
         contents=prompt_round,
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTION,
@@ -356,7 +356,7 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
         )
 
         response = ai_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash",
             contents=prompt_pembuka,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,

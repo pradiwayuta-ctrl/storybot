@@ -1,5 +1,6 @@
 import os
 import re
+import html
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
@@ -66,7 +67,7 @@ def cancel_afk_timer(room):
         room["timer_task"] = None
 
 async def start_afk_timer(client, chat_id, user_id, timeout=120):
-    """Timer otomatis 2 menit (120 detik) untuk auto-skip jika AFK."""
+    """Timer otomatis 2 menit untuk auto-skip jika AFK."""
     await asyncio.sleep(timeout)
     room = get_room(chat_id)
     
@@ -77,7 +78,7 @@ async def start_afk_timer(client, chat_id, user_id, timeout=120):
             room["round_actions"].append(f"- {skipped_player_name}: (Waktu habis / auto-skip AFK)")
             await client.send_message(
                 chat_id, 
-                f"⌛ <b>Waktu Habis!</b> Giliran <b>{skipped_player_name}</b> di-skip otomatis oleh Game Master."
+                f"⌛ <b>Waktu Habis!</b> Giliran <b>{html.escape(skipped_player_name)}</b> di-skip otomatis oleh Game Master."
             )
             
             room["current_turn_index"] += 1
@@ -96,7 +97,7 @@ async def prompt_next_turn(client, chat_id):
     
     await client.send_message(
         chat_id,
-        f"🎯 <b>GILIRAN PLAYER:</b> <a href=\"tg://user?id={current_user_id}\">{player_name}</a>\n\n"
+        f"🎯 <b>GILIRAN PLAYER:</b> <a href=\"tg://user?id={current_user_id}\">{html.escape(player_name)}</a>\n\n"
         f"Ketik dialog/aksi kamu di grup ini.\n"
         f"<i>(Batas Waktu: 2 Menit | Ketik /skip untuk melewati)</i>"
     )
@@ -107,7 +108,7 @@ async def process_end_of_round(client, chat_id):
     room = get_room(chat_id)
     cancel_afk_timer(room)
     
-    await client.send_message(chat_id, "🎲 <b>[RONDE SELESAI]</b> <i>Game Master sedang memproses aksi seluruh pemain...</i>")
+    status_msg = await client.send_message(chat_id, "🎲 <b>[RONDE SELESAI]</b> <i>Game Master sedang memproses aksi seluruh pemain...</i>")
 
     combined_actions = "\n".join(room["round_actions"])
     recent_context = "\n".join(room["history"][-3:])
@@ -118,24 +119,28 @@ async def process_end_of_round(client, chat_id):
         f"Sebagai Game Master, berikan narasi balasan (max 2 kalimat) atas seluruh aksi pemain di atas."
     )
 
-    response = ai_client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt_round,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
-            max_output_tokens=100,
-            temperature=0.7
+    try:
+        response = ai_client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt_round,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                max_output_tokens=100,
+                temperature=0.7
+            )
         )
-    )
+        narasi_baru = html.escape(response.text)
+        room["history"].append(f"[NARATOR]: {narasi_baru}")
+        
+        room["round_actions"].clear()
+        room["current_turn_index"] = 0
+        
+        await client.send_message(chat_id, f"📜 <b>[NARASI GAME MASTER]</b>\n\n{narasi_baru}")
+        await prompt_next_turn(client, chat_id)
 
-    narasi_baru = response.text
-    room["history"].append(f"[NARATOR]: {narasi_baru}")
-    
-    room["round_actions"].clear()
-    room["current_turn_index"] = 0
-    
-    await client.send_message(chat_id, f"📜 <b>[NARASI GAME MASTER]</b>\n\n{narasi_baru}")
-    await prompt_next_turn(client, chat_id)
+    except Exception as e:
+        print(f"Error Generate Round: {e}")
+        await status_msg.edit_text(f"⚠️ <b>Gagal memproses narasi:</b> <code>{html.escape(str(e))}</code>\n\nKetik /skip atau coba lagi.")
 
 # ---------------------------------------------------------
 # 4. HANDLER START (PRIVATE CHAT & GROUP)
@@ -155,14 +160,14 @@ async def start_private(client, message: Message):
     ])
     
     text = (
-        f"🛡️ <b>GAME MASTER ROLEPLAY BOT</b> 🛡️\n\n"
-        f"Selamat datang, <b>{message.from_user.first_name}</b>!\n"
-        f"Sistem ini bertindak sebagai Game Master otomatis untuk memimpin jalannya alur cerita Roleplay di grup kamu.\n\n"
+        f"🛡️ <b>GAME MASTER ROLEPLAY BOT</b>\n\n"
+        f"Selamat datang, <b>{html.escape(message.from_user.first_name)}</b>!\n"
+        f"Sistem ini bertindak sebagai Game Master otomatis untuk memimpin alur cerita Roleplay di grup kamu.\n\n"
         f"<b>Cara Memulai Game:</b>\n"
         f"1. Tambahkan bot ini ke <b>Grup Telegram</b> kamu.\n"
         f"2. Berikan akses <b>Admin</b> (terutama izin <i>Pin Messages</i>).\n"
         f"3. Ketik perintah <code>/start_rp</code> di grup untuk membuka Arena Pendaftaran.\n\n"
-        f"Pilih menu di bawah untuk melihat aturan dan cara input aksi!"
+        f"Pilih menu di bawah untuk melihat aturan dan cara input aksi."
     )
     await message.reply(text, reply_markup=keyboard)
 
@@ -194,9 +199,9 @@ async def start_rp_lobby(client, message: Message):
     ])
     
     welcome_text = (
-        f"🏛️ <b>ARENA PENDAFTARAN PETUALANGAN</b> 🏛️\n\n"
+        f"🏛️ <b>ARENA PENDAFTARAN PETUALANGAN</b>\n\n"
         f"Pintu petualangan baru telah dibuka!\n"
-        f"• Tema Saat Ini: <b>{room['theme']}</b> <i>(Ganti via <code>/tema nama_tema</code>)</i>\n\n"
+        f"• Tema Saat Ini: <b>{html.escape(room['theme'])}</b> <i>(Ganti via <code>/tema nama_tema</code>)</i>\n\n"
         f"Tekan tombol <b>Join Game</b> untuk mendaftarkan karakter kamu!"
     )
     
@@ -255,8 +260,8 @@ async def handle_info_buttons(client, callback: CallbackQuery):
             ]
         ])
         text = (
-            f"🛡️ <b>GAME MASTER ROLEPLAY BOT</b> 🛡️\n\n"
-            f"Selamat datang, <b>{callback.from_user.first_name}</b>!\n"
+            f"🛡️ <b>GAME MASTER ROLEPLAY BOT</b>\n\n"
+            f"Selamat datang, <b>{html.escape(callback.from_user.first_name)}</b>!\n"
             f"Pilih menu di bawah untuk melihat penjelasan sistem permainan."
         )
         await callback.message.edit_text(text, reply_markup=keyboard)
@@ -289,9 +294,9 @@ async def handle_info_buttons(client, callback: CallbackQuery):
             [InlineKeyboardButton("🚀 Mulai Petualangan", callback_data="start_story")]
         ])
         welcome_text = (
-            f"🏛️ <b>ARENA PENDAFTARAN PETUALANGAN</b> 🏛️\n\n"
+            f"🏛️ <b>ARENA PENDAFTARAN PETUALANGAN</b>\n\n"
             f"Pintu petualangan baru telah dibuka!\n"
-            f"• Tema Saat Ini: <b>{room['theme']}</b>\n\n"
+            f"• Tema Saat Ini: <b>{html.escape(room['theme'])}</b>\n\n"
             f"Tekan tombol <b>Join Game</b> untuk mendaftarkan karakter kamu!"
         )
         await callback.message.edit_text(welcome_text, reply_markup=keyboard)
@@ -313,7 +318,7 @@ async def set_theme(client, message: Message):
 
     new_theme = " ".join(message.command[1:])
     room["theme"] = new_theme
-    await message.reply(f"🎨 <b>Tema Petualangan Diubah:</b> <code>{new_theme}</code>")
+    await message.reply(f"🎨 <b>Tema Petualangan Diubah:</b> <code>{html.escape(new_theme)}</code>")
 
 @app.on_callback_query(filters.regex("^(join_rp|leave_rp|start_story)$"))
 async def handle_lobby_buttons(client, callback: CallbackQuery):
@@ -345,7 +350,7 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
         room["turn_order"] = list(room["players"].keys())
         room["current_turn_index"] = 0
 
-        await callback.message.edit_text("🎲 <b>[GAME MASTER]</b> <i>Sedang merangkai takdir dan pembukaan dunia...</i>")
+        status_msg = await callback.message.edit_text("🎲 <b>[GAME MASTER]</b> <i>Sedang merangkai takdir dan pembukaan dunia...</i>")
         
         player_names = ", ".join(room["players"].values())
         prompt_pembuka = (
@@ -354,21 +359,26 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
             f"menggunakan nama depan mereka, lalu tutup dengan situasi konflik awal."
         )
 
-        response = ai_client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt_pembuka,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                max_output_tokens=150,
-                temperature=0.7
+        try:
+            response = ai_client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=prompt_pembuka,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    max_output_tokens=150,
+                    temperature=0.7
+                )
             )
-        )
-        
-        narasi_awal = response.text
-        room["history"].append(f"[NARATOR]: {narasi_awal}")
-        
-        await callback.message.reply(f"📜 <b>[AWAL PETUALANGAN]</b>\n\n{narasi_awal}")
-        await prompt_next_turn(client, chat_id)
+            narasi_awal = html.escape(response.text)
+            room["history"].append(f"[NARATOR]: {narasi_awal}")
+            
+            await callback.message.reply(f"📜 <b>[AWAL PETUALANGAN]</b>\n\n{narasi_awal}")
+            await prompt_next_turn(client, chat_id)
+            
+        except Exception as e:
+            print(f"Error Start Story: {e}")
+            room["status"] = "LOBBY" # kembalikan ke status lobby jika error
+            await status_msg.edit_text(f"⚠️ <b>Gagal membuat alur cerita:</b> <code>{html.escape(str(e))}</code>\n\nSilakan coba klik 'Mulai Petualangan' lagi.")
 
 @app.on_message(filters.group & filters.text & ~filters.command(["start_rp", "start", "selesai_rp", "skip", "tema"]))
 async def handle_turn_action(client, message: Message):
@@ -400,7 +410,7 @@ async def handle_turn_action(client, message: Message):
     formatted_action = f"- {player_name}: " + " ".join(parsed_parts)
     
     room["round_actions"].append(formatted_action)
-    await message.reply(f"⚔️ Aksi <b>{player_name}</b> terrekam oleh Game Master!")
+    await message.reply(f"⚔️ Aksi <b>{html.escape(player_name)}</b> terrekam oleh Game Master!")
     
     room["current_turn_index"] += 1
     await prompt_next_turn(client, chat_id)
@@ -419,7 +429,7 @@ async def skip_turn(client, message: Message):
     skipped_player_name = room["players"][active_user_id]
     
     room["round_actions"].append(f"- {skipped_player_name}: (Tidak bertindak / di-skip)")
-    await message.reply(f"⏭️ Giliran <b>{skipped_player_name}</b> dilewati!")
+    await message.reply(f"⏭️ Giliran <b>{html.escape(skipped_player_name)}</b> dilewati!")
     
     room["current_turn_index"] += 1
     await prompt_next_turn(client, chat_id)
@@ -437,7 +447,7 @@ async def stop_rp(client, message: Message):
     room["players"].clear()
     room["history"].clear()
     room["round_actions"].clear()
-    await message.reply("🏆 <b>[PETUALANGAN SELESAI]</b> Sesi permaianan telah diakhiri. Sampai jumpa di petualangan berikutnya!")
+    await message.reply("🏆 <b>[PETUALANGAN SELESAI]</b> Sesi permainan telah diakhiri. Sampai jumpa di petualangan berikutnya!")
 
 if __name__ == "__main__":
     app.run()

@@ -24,7 +24,7 @@ app = Client(
     api_id=API_ID, 
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
-    parse_mode=ParseMode.HTML  # Menggunakan HTML agar format teks tebal/miring rapi di Telegram
+    parse_mode=ParseMode.HTML
 )
 
 SYSTEM_INSTRUCTION = """
@@ -87,7 +87,6 @@ async def prompt_next_turn(client, chat_id):
     room = get_room(chat_id)
     cancel_afk_timer(room)
     
-    # Jika semua player di ronde ini sudah aksi -> Generate Narasi GM!
     if room["current_turn_index"] >= len(room["turn_order"]):
         await process_end_of_round(client, chat_id)
         return
@@ -120,7 +119,7 @@ async def process_end_of_round(client, chat_id):
     )
 
     response = ai_client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-3.8-flash",
         contents=prompt_round,
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTION,
@@ -356,7 +355,7 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
         )
 
         response = ai_client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3.8-flash",
             contents=prompt_pembuka,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,

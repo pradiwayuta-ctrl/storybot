@@ -18,7 +18,7 @@ BOT_TOKEN = os.environ.get("TELEGRAM_API_KEY")
 if not all([GROQ_API_KEY, API_ID, API_HASH, BOT_TOKEN]):
     raise ValueError("Pastikan GROQ_API_KEY, TELEGRAM_API_ID, TELEGRAM_API_HASH, dan TELEGRAM_API_KEY sudah diisi di Railway!")
 
-# Init Client yang mengarah ke Endpoint resmi Groq Cloud
+# Init Client resmi Groq Cloud
 ai_client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY,
@@ -41,8 +41,12 @@ Tugasmu:
 4. Hanya sebut nama pemain yang terdaftar.
 """
 
-# Model Resmi Groq Cloud Terbaru (Pintar, Cepat, Imersif & Gratis)
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# ID Model Groq Resmi Teraktif & Paling Stabil
+GROQ_MODELS = [
+    "llama3-70b-8192",   # Llama 3 70B (Sangat Pintar & Imersif)
+    "llama3-8b-8192",    # Llama 3 8B (Super Kencang)
+    "mixtral-8x7b-32768" # Mixtral (Cadangan Handal)
+]
 
 # ---------------------------------------------------------
 # 2. STATE ROOM MEMORY
@@ -65,34 +69,36 @@ def get_room(chat_id):
     return rooms[chat_id]
 
 # ---------------------------------------------------------
-# 3. HELPER GROQ NARRATIVE GENERATOR
+# 3. HELPER GROQ NARRATIVE GENERATOR WITH FALLBACK
 # ---------------------------------------------------------
 async def generate_groq_narrative(prompt, max_tokens=150):
-    """Memanggil Groq API secara asinkron tanpa membekukan Pyrogram."""
     loop = asyncio.get_running_loop()
+    last_error = None
 
-    try:
-        completion = await loop.run_in_executor(
-            None,
-            lambda: ai_client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": SYSTEM_INSTRUCTION},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=max_tokens,
-                temperature=0.7
+    for model_name in GROQ_MODELS:
+        try:
+            completion = await loop.run_in_executor(
+                None,
+                lambda m=model_name: ai_client.chat.completions.create(
+                    model=m,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_INSTRUCTION},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=0.7
+                )
             )
-        )
-        content = completion.choices[0].message.content
-        if content and content.strip():
-            return content.strip()
-        else:
-            raise Exception("Respons dari Groq kosong.")
-            
-    except Exception as e:
-        print(f"Error Groq API: {e}")
-        raise e
+            content = completion.choices[0].message.content
+            if content and content.strip():
+                return content.strip()
+        except Exception as e:
+            last_error = e
+            print(f"Model {model_name} error ({e}), mencoba model cadangan...")
+            await asyncio.sleep(1)
+            continue
+
+    raise last_error or Exception("Semua model Groq sedang tidak merespons.")
 
 # ---------------------------------------------------------
 # 4. HELPER FUNCTIONS & TURN MANAGER

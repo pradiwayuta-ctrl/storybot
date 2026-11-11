@@ -8,20 +8,20 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQ
 from openai import OpenAI
 
 # ---------------------------------------------------------
-# 1. SETUP ENVIRONMENT VARIABLES & OPENROUTER CLIENT
+# 1. SETUP ENVIRONMENT VARIABLES & GROQ CLIENT
 # ---------------------------------------------------------
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 API_ID = int(os.environ.get("TELEGRAM_API_ID", 0))
 API_HASH = os.environ.get("TELEGRAM_API_HASH")
 BOT_TOKEN = os.environ.get("TELEGRAM_API_KEY")
 
-if not all([OPENROUTER_API_KEY, API_ID, API_HASH, BOT_TOKEN]):
-    raise ValueError("Pastikan OPENROUTER_API_KEY, TELEGRAM_API_ID, TELEGRAM_API_HASH, dan TELEGRAM_API_KEY sudah diisi di Railway!")
+if not all([GROQ_API_KEY, API_ID, API_HASH, BOT_TOKEN]):
+    raise ValueError("Pastikan GROQ_API_KEY, TELEGRAM_API_ID, TELEGRAM_API_HASH, dan TELEGRAM_API_KEY sudah diisi di Railway!")
 
-# Init OpenAI Client yang mengarah ke endpoint OpenRouter
+# Init Client yang mengarah ke Endpoint resmi Groq Cloud
 ai_client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
+    base_url="https://api.groq.com/openai/v1",
+    api_key=GROQ_API_KEY,
 )
 
 app = Client(
@@ -41,13 +41,8 @@ Tugasmu:
 4. Hanya sebut nama pemain yang terdaftar.
 """
 
-# Daftar Model Gratisan OpenRouter yang Cepat & Bagus untuk RP
-FREE_MODELS = [
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "deepseek/deepseek-r1:free",
-    "mistralai/mistral-7b-instruct:free",
-    "qwen/qwen-2.5-72b-instruct:free"
-]
+# Model Llama 3.3 70B di Groq (Pintar, Cepat & Gratis)
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # ---------------------------------------------------------
 # 2. STATE ROOM MEMORY
@@ -70,38 +65,34 @@ def get_room(chat_id):
     return rooms[chat_id]
 
 # ---------------------------------------------------------
-# 3. HELPER OPENROUTER WITH MULTI-MODEL FALLBACK
+# 3. HELPER GROQ NARRATIVE GENERATOR
 # ---------------------------------------------------------
-async def generate_openrouter_narrative(prompt, max_tokens=150):
-    """Mencoba memanggil model gratisan satu per satu secara otomatis jika ada error/limit."""
+async def generate_groq_narrative(prompt, max_tokens=150):
+    """Memanggil Groq API secara asinkron tanpa membekukan Pyrogram."""
     loop = asyncio.get_running_loop()
 
-    for model_name in FREE_MODELS:
-        try:
-            # Jalankan panggilan OpenAI client yang sinkron ke dalam executor async
-            completion = await loop.run_in_executor(
-                None,
-                lambda: ai_client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_INSTRUCTION},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=max_tokens,
-                    temperature=0.7
-                )
+    try:
+        completion = await loop.run_in_executor(
+            None,
+            lambda: ai_client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[
+                    {"role": "system", "content": SYSTEM_INSTRUCTION},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=max_tokens,
+                temperature=0.7
             )
+        )
+        content = completion.choices[0].message.content
+        if content and content.strip():
+            return content.strip()
+        else:
+            raise Exception("Respons dari Groq kosong.")
             
-            content = completion.choices[0].message.content
-            if content and content.strip():
-                return content.strip()
-                
-        except Exception as e:
-            print(f"Model {model_name} gagal/limit ({e}), mencoba model cadangan berikutnya...")
-            await asyncio.sleep(1)
-            continue
-
-    raise Exception("Seluruh server model gratisan sedang penuh/busy. Silakan coba klik tombol sekali lagi!")
+    except Exception as e:
+        print(f"Error Groq API: {e}")
+        raise e
 
 # ---------------------------------------------------------
 # 4. HELPER FUNCTIONS & TURN MANAGER
@@ -164,7 +155,7 @@ async def process_end_of_round(client, chat_id):
     )
 
     try:
-        raw_text = await generate_openrouter_narrative(prompt_round, max_tokens=100)
+        raw_text = await generate_groq_narrative(prompt_round, max_tokens=100)
         narasi_baru = html.escape(raw_text)
         room["history"].append(f"[NARATOR]: {narasi_baru}")
         
@@ -408,7 +399,7 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
         )
 
         try:
-            raw_text = await generate_openrouter_narrative(prompt_pembuka, max_tokens=150)
+            raw_text = await generate_groq_narrative(prompt_pembuka, max_tokens=150)
             narasi_awal = html.escape(raw_text)
             room["history"].append(f"[NARATOR]: {narasi_awal}")
             
@@ -421,7 +412,7 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
             
             error_text = (
                 f"🏛️ <b>ARENA PENDAFTARAN PETUALANGAN</b>\n\n"
-                f"⚠️ <b>Server AI sedang sibuk sementara:</b> <code>{html.escape(str(e))}</code>\n"
+                f"⚠️ <b>Gagal memuat alur cerita:</b> <code>{html.escape(str(e))}</code>\n"
                 f"Silakan klik tombol <b>Mulai Petualangan</b> lagi."
             )
             await status_msg.edit_text(error_text, reply_markup=lobby_keyboard)

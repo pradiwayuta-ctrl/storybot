@@ -5,21 +5,25 @@ import asyncio
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
 # ---------------------------------------------------------
-# 1. SETUP ENVIRONMENT VARIABLES & CLIENTS
+# 1. SETUP ENVIRONMENT VARIABLES & OPENROUTER CLIENT
 # ---------------------------------------------------------
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 API_ID = int(os.environ.get("TELEGRAM_API_ID", 0))
 API_HASH = os.environ.get("TELEGRAM_API_HASH")
 BOT_TOKEN = os.environ.get("TELEGRAM_API_KEY")
 
-if not all([GEMINI_API_KEY, API_ID, API_HASH, BOT_TOKEN]):
-    raise ValueError("Pastikan semua Environment Variables (GEMINI_API_KEY, TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_API_KEY) sudah diisi!")
+if not all([OPENROUTER_API_KEY, API_ID, API_HASH, BOT_TOKEN]):
+    raise ValueError("Pastikan OPENROUTER_API_KEY, TELEGRAM_API_ID, TELEGRAM_API_HASH, dan TELEGRAM_API_KEY sudah diisi di Railway!")
 
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
+# Init OpenAI Client yang mengarah ke endpoint OpenRouter
+ai_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
+
 app = Client(
     "rp_narrator_bot", 
     api_id=API_ID, 
@@ -36,6 +40,14 @@ Tugasmu:
 3. Gunakan gaya bahasa naratif RPG yang immersif dan dramatis.
 4. Hanya sebut nama pemain yang terdaftar.
 """
+
+# Daftar Model Gratisan OpenRouter yang Cepat & Bagus untuk RP
+FREE_MODELS = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "deepseek/deepseek-r1:free",
+    "mistralai/mistral-7b-instruct:free",
+    "qwen/qwen-2.5-72b-instruct:free"
+]
 
 # ---------------------------------------------------------
 # 2. STATE ROOM MEMORY
@@ -58,33 +70,38 @@ def get_room(chat_id):
     return rooms[chat_id]
 
 # ---------------------------------------------------------
-# 3. HELPER AI WITH RETRY (Mencegah Error 503)
+# 3. HELPER OPENROUTER WITH MULTI-MODEL FALLBACK
 # ---------------------------------------------------------
-async def generate_ai_with_retry(prompt, system_instruction, max_tokens=150):
-    models_to_try = ["gemini-3.8-flash", "gemini-2.0-flash"]
-    
-    for model_name in models_to_try:
-        for attempt in range(3):
-            try:
-                response = ai_client.models.generate_content(
+async def generate_openrouter_narrative(prompt, max_tokens=150):
+    """Mencoba memanggil model gratisan satu per satu secara otomatis jika ada error/limit."""
+    loop = asyncio.get_running_loop()
+
+    for model_name in FREE_MODELS:
+        try:
+            # Jalankan panggilan OpenAI client yang sinkron ke dalam executor async
+            completion = await loop.run_in_executor(
+                None,
+                lambda: ai_client.chat.completions.create(
                     model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        max_output_tokens=max_tokens,
-                        temperature=0.7
-                    )
+                    messages=[
+                        {"role": "system", "content": SYSTEM_INSTRUCTION},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=0.7
                 )
-                if response and response.text:
-                    return response.text
-            except Exception as e:
-                err_msg = str(e)
-                if "503" in err_msg or "UNAVAILABLE" in err_msg or "high demand" in err_msg:
-                    await asyncio.sleep(2)
-                    continue
-                else:
-                    raise e
-    raise Exception("Server AI sedang sangat sibuk. Silakan coba sebentar lagi.")
+            )
+            
+            content = completion.choices[0].message.content
+            if content and content.strip():
+                return content.strip()
+                
+        except Exception as e:
+            print(f"Model {model_name} gagal/limit ({e}), mencoba model cadangan berikutnya...")
+            await asyncio.sleep(1)
+            continue
+
+    raise Exception("Seluruh server model gratisan sedang penuh/busy. Silakan coba klik tombol sekali lagi!")
 
 # ---------------------------------------------------------
 # 4. HELPER FUNCTIONS & TURN MANAGER
@@ -147,7 +164,7 @@ async def process_end_of_round(client, chat_id):
     )
 
     try:
-        raw_text = await generate_ai_with_retry(prompt_round, SYSTEM_INSTRUCTION, max_tokens=100)
+        raw_text = await generate_openrouter_narrative(prompt_round, max_tokens=100)
         narasi_baru = html.escape(raw_text)
         room["history"].append(f"[NARATOR]: {narasi_baru}")
         
@@ -365,7 +382,6 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
             await callback.answer("Minimal harus ada 1 pemain yang terdaftar!", show_alert=True)
             return
 
-        # Keyboard cadangan jika terjadi error pemanggilan API
         lobby_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("⚔️ Join Game", callback_data="join_rp"), InlineKeyboardButton("🚪 Leave", callback_data="leave_rp")],
             [InlineKeyboardButton("📖 Rules", callback_data="show_rules"), InlineKeyboardButton("⚡ Panduan Aksi", callback_data="show_features")],
@@ -392,7 +408,7 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
         )
 
         try:
-            raw_text = await generate_ai_with_retry(prompt_pembuka, SYSTEM_INSTRUCTION, max_tokens=150)
+            raw_text = await generate_openrouter_narrative(prompt_pembuka, max_tokens=150)
             narasi_awal = html.escape(raw_text)
             room["history"].append(f"[NARATOR]: {narasi_awal}")
             
@@ -405,10 +421,9 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
             
             error_text = (
                 f"🏛️ <b>ARENA PENDAFTARAN PETUALANGAN</b>\n\n"
-                f"⚠️ <b>Server AI sedang sibuk sementara.</b>\n"
-                f"Silakan klik tombol <b>Mulai Petualangan</b> di bawah ini sekali lagi."
+                f"⚠️ <b>Server AI sedang sibuk sementara:</b> <code>{html.escape(str(e))}</code>\n"
+                f"Silakan klik tombol <b>Mulai Petualangan</b> lagi."
             )
-            # Tombol pendaftaran TETAP DITAMPILKAN saat pesan error diedit!
             await status_msg.edit_text(error_text, reply_markup=lobby_keyboard)
 
 @app.on_message(filters.group & filters.text & ~filters.command(["start_rp", "start", "selesai_rp", "skip", "tema"]))

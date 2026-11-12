@@ -42,11 +42,11 @@ app = Client(
 )
 
 SYSTEM_INSTRUCTION = (
-    "Penulis novel fiksi interaktif bahasa Indonesia yang hidup, ekspresif, dan sinematik. "
-    "Tulis narasi sudut pandang orang ketiga yang mengalir, atmosferik, dan sesuai genre. "
-    "Dilarang menyebut Game Master, pemain, ronde, HP, sistem, atau menyapa Anda. "
-    "Hanya gunakan nama tokoh yang diberikan. "
-    "Selalu hadirkan situasi, dialog balasan, atau kejadian yang memicu interaksi secara alami."
+    "Kamu adalah penulis novel bahasa Indonesia yang rapi, natural, ringkas, dan menggunakan EYD yang benar. "
+    "Tulis sudut pandang orang ketiga yang mengalir dan tidak bertele-tele. "
+    "Dilarang menulis label seperti 'Paragraf 1:' atau 'Paragraf 2:'. "
+    "Dilarang menyebut Game Master, pemain, ronde, HP, sistem, atau menyapa pembaca. "
+    "Gunakan tata bahasa Indonesia baku yang enak dibaca tanpa kata-kata aneh atau typo."
 )
 
 GENRE_LIST = {
@@ -86,7 +86,6 @@ def get_room(chat_id):
     return rooms[chat_id]
 
 def get_actor_id(obj):
-    """Mendukung akun pribadi maupun Anonymous Admin grup."""
     if getattr(obj, "from_user", None):
         return obj.from_user.id
     if getattr(obj, "sender_chat", None):
@@ -100,8 +99,13 @@ def get_actor_name(obj):
         return obj.sender_chat.title or "Tokoh"
     return "Tokoh"
 
+def clean_narrative_labels(text):
+    """Membersihkan label 'Paragraf 1:' atau 'Paragraf 2:' jika AI masih memunculkannya."""
+    cleaned = re.sub(r'(?i)\bparagraf\s*\d+\s*:\s*', '', text)
+    return cleaned.strip()
+
 def highlight_player_names(escaped_text, player_names):
-    """Menebalkan semua nama pemain di dalam alur cerita agar mudah dibaca."""
+    """Menebalkan semua nama pemain di dalam alur cerita agar menonjol."""
     result = escaped_text
     sorted_names = sorted(player_names, key=len, reverse=True)
     for name in sorted_names:
@@ -112,38 +116,68 @@ def highlight_player_names(escaped_text, player_names):
         result = pattern.sub(lambda m: f"<b>{m.group(0)}</b>", result)
     return result
 
+def build_role_setup_instruction(player_names_list, topic, genre):
+    """Menentukan peran pemain berdasarkan jumlah pemain dan tema/judul topik."""
+    count = len(player_names_list)
+    names_str = ", ".join(player_names_list)
+
+    if count == 1:
+        solo_name = player_names_list[0]
+        return (
+            f"Jumlah pemain: 1 orang ({solo_name}). Tema/Judul cerita: '{topic}' (Genre: {genre}). "
+            f"Aturan peran: Jadikan {solo_name} sebagai tokoh utama ('aku' dalam judul tema tersebut). "
+            f"Jika di judul tema '{topic}' terdapat nama tokoh lain (misalnya 'Rose' pada 'aku dan rose'), "
+            f"hadirkan tokoh tersebut sebagai karakter pendamping utama yang langsung berinteraksi dengan {solo_name}. "
+            f"Jika judul tema tidak menyebut nama lain, hadirkan 1 tokoh pendamping yang relevan dengan tema '{topic}'. "
+            f"Jangan memunculkan tokoh tambahan lain yang tidak perlu."
+        )
+    elif count == 2:
+        p1, p2 = player_names_list[0], player_names_list[1]
+        return (
+            f"Jumlah pemain: 2 orang ({p1} dan {p2}). Tema/Judul cerita: '{topic}' (Genre: {genre}). "
+            f"Aturan peran: Sesuaikan peran {p1} dan {p2} sebagai dua tokoh sentral dalam tema '{topic}' "
+            f"(misalnya jika tema 'aku dan rose', posisikan {p1} dan {p2} sebagai pasangan/dua tokoh utama dalam kisah tersebut). "
+            f"Fokus hanya pada {p1} dan {p2}, jangan menambah tokoh NPC baru kecuali sekadar figuran latar."
+        )
+    else:
+        return (
+            f"Jumlah pemain: {count} orang ({names_str}). Tema/Judul cerita: '{topic}' (Genre: {genre}). "
+            f"Aturan peran: Bagikan peran secara alami kepada semua {count} pemain tersebut di dalam satu latar cerita bertema '{topic}' "
+            f"sehingga setiap pemain punya posisi dan keterkaitan yang jelas satu sama lain. "
+            f"Jangan memunculkan tokoh tambahan di luar daftar pemain ({names_str})."
+        )
+
 def get_dynamic_pacing_cue(round_num, genre, is_solo=False):
     g = genre.lower()
     if is_solo:
         return (
-            "Mode Solo: Munculkan karakter pendamping/lawan bicara di sekitar tokoh utama yang langsung "
-            "menanggapi ucapan atau tindakannya dengan dialog dan kejadian seru."
+            "Mode Solo: Gerakkan dialog atau reaksi tokoh pendamping di sekitar tokoh utama agar cerita terasa hidup dan interaktif."
         )
     if g == "romance":
         cues = [
             "Hadirkan momen canggung, tatapan tak terduga, atau situasi yang memancing obrolan emosional antar tokoh.",
-            "Munculkan salah paham halus, rahasia kecil, atau keadaan yang memaksa dua tokoh saling bergantung.",
+            "Munculkan salah paham halus, rahasia kecil, atau keadaan yang memaksa tokoh saling bergantung.",
             "Hadirkan kejutan atau dilema perasaan yang menguji kedekatan dan kejujuran antar tokoh.",
-            "Tingkatkan intensitas emosi dan ketegangan hati dari setiap keputusan yang mereka ambil."
+            "Tingkatkan intensitas emosi dari setiap keputusan yang mereka ambil."
         ]
     elif g == "comedy":
         cues = [
             "Munculkan kekacauan kecil atau kesalahpahaman konyol yang memancing para tokoh saling bereaksi.",
-            "Buat situasi makin absurd dan di luar rencana sehingga tiap tokoh harus merespons spontan.",
-            "Hadirkan kejutan kocak atau kejadian tak terduga yang bikin suasana makin ramai dan hidup.",
-            "Puncak kekacauan komedi yang merespons langsung tingkah laku unik masing-masing tokoh."
+            "Buat situasi makin absurd di luar rencana sehingga tiap tokoh harus merespons spontan.",
+            "Hadirkan kejutan kocak yang bikin suasana makin ramai dan hidup.",
+            "Puncak kekacauan komedi yang merespons langsung tingkah laku masing-masing tokoh."
         ]
     else:
         cues = [
-            "Hadirkan petunjuk baru atau ancaman lingkungan yang memancing para tokoh berdiskusi dan mengambil sikap.",
-            "Sisipkan dilema atau perbedaan kepentingan yang memicu perdebatan, kerja sama, atau gesekan antar tokoh.",
-            "Kejutkan alur dengan plot twist—rahasia terungkap, jalan buntu, atau pihak tak terduga muncul.",
-            "Tingkatkan taruhan cerita sehingga setiap pilihan tindakan tokoh membawa dampak nyata."
+            "Hadirkan petunjuk baru atau situasi mendesak yang memancing para tokoh berdiskusi dan mengambil sikap.",
+            "Sisipkan dilema atau perbedaan kepentingan yang memicu kerja sama atau gesekan antar tokoh.",
+            "Kejutkan alur dengan plot twist yang mengubah situasi di depan mereka.",
+            "Tingkatkan taruhan cerita sehingga setiap tindakan tokoh membawa dampak nyata."
         ]
     return cues[(round_num - 1) % len(cues)]
 
 # ---------------------------------------------------------
-# 3. UI BUILDERS (RAPI, TANPA DOBEL TOMBOL)
+# 3. UI BUILDERS
 # ---------------------------------------------------------
 def build_lobby_text(room):
     if room["players"]:
@@ -157,12 +191,12 @@ def build_lobby_text(room):
     return (
         f"🛋️ <b>LOBBY CERITA</b>\n\n"
         f"🎭 <b>Genre</b>  : {html.escape(room['genre'])}\n"
-        f"📌 <b>Topik</b>  : <i>{html.escape(room['topic'])}</i>\n\n"
+        f"📌 <b>Tema</b>   : <i>{html.escape(room['topic'])}</i>\n\n"
         f"👥 <b>Daftar Tokoh ({len(room['players'])}):</b>\n"
         f"<blockquote>{players_lines}</blockquote>\n"
         f"⚙️ <b>Pengaturan Cepat:</b>\n"
         f"• <code>/nama NamaBaru</code> — Ubah nama tokoh\n"
-        f"• <code>/topik Premis</code> — Ubah latar cerita"
+        f"• <code>/topik JudulTema</code> — Ubah tema cerita"
     )
 
 def build_lobby_keyboard():
@@ -220,7 +254,7 @@ def build_private_home(first_name, bot_username):
         f"<b>🚀 Cara Memulai</b>\n\n"
         f"<b>1.</b> Masukkan bot ke grup & jadikan <b>Admin</b>\n"
         f"<b>2.</b> Ketik <code>/start_rp</code> untuk membuka Lobby\n"
-        f"<b>3.</b> Tekan <b>Join Game</b>, pilih genre & topik\n"
+        f"<b>3.</b> Tekan <b>Join Game</b>, pilih genre & tema\n"
         f"<b>4.</b> Tekan <b>Mulai Cerita</b> untuk bermain"
         f"</blockquote>"
     )
@@ -236,18 +270,20 @@ def build_private_home(first_name, bot_username):
     return text, keyboard
 
 # ---------------------------------------------------------
-# 4. HELPER GROQ AUTO-MODEL DISCOVERY
+# 4. HELPER GROQ MODEL SELECTION (HANYA MODEL BESAR / ANTI-TYPO)
 # ---------------------------------------------------------
 def get_active_groq_models():
     priority = [
         "llama-3.3-70b-versatile",
-        "llama-3.1-8b-instant",
-        "meta-llama/llama-4-scout-17b-16e-instruct",
-        "meta-llama/llama-4-maverick-17b-128e-instruct"
+        "meta-llama/llama-4-maverick-17b-128e-instruct",
+        "meta-llama/llama-4-scout-17b-16e-instruct"
     ]
     try:
         models_page = ai_client.models.list()
-        excluded_keywords = ["whisper", "tts", "guard", "vision", "embedding", "compound", "r1", "qwen"]
+        excluded_keywords = [
+            "whisper", "tts", "guard", "vision", "embedding",
+            "compound", "r1", "qwen", "8b", "instant", "gemma"
+        ]
         available = [
             m.id for m in models_page.data
             if not any(kw in m.id.lower() for kw in excluded_keywords)
@@ -261,7 +297,7 @@ def get_active_groq_models():
         print(f"Gagal mengambil daftar model Groq: {e}")
         return priority
 
-async def generate_groq_json(prompt, max_tokens=550):
+async def generate_groq_json(prompt, max_tokens=450):
     loop = asyncio.get_running_loop()
     models_to_use = await loop.run_in_executor(None, get_active_groq_models)
     last_error = None
@@ -278,7 +314,7 @@ async def generate_groq_json(prompt, max_tokens=550):
                     ],
                     response_format={"type": "json_object"},
                     max_tokens=max_tokens,
-                    temperature=0.8
+                    temperature=0.65
                 )
             )
             content = completion.choices[0].message.content
@@ -292,7 +328,7 @@ async def generate_groq_json(prompt, max_tokens=550):
 
     raise last_error or Exception("Tidak ada model Groq aktif yang merespons.")
 
-async def generate_groq_narrative(prompt, max_tokens=600):
+async def generate_groq_narrative(prompt, max_tokens=450):
     loop = asyncio.get_running_loop()
     models_to_use = await loop.run_in_executor(None, get_active_groq_models)
     last_error = None
@@ -308,12 +344,12 @@ async def generate_groq_narrative(prompt, max_tokens=600):
                         {"role": "user", "content": prompt}
                     ],
                     max_tokens=max_tokens,
-                    temperature=0.8
+                    temperature=0.65
                 )
             )
             content = completion.choices[0].message.content
             if content and len(content.strip()) > 25:
-                return content.strip()
+                return clean_narrative_labels(content.strip())
         except Exception as e:
             last_error = e
             await asyncio.sleep(0.4)
@@ -382,7 +418,6 @@ async def prompt_next_turn(client, chat_id):
         if current_user_id > 0 else f"<b>{html.escape(player_name)}</b>"
     )
 
-    # Tanpa tombol status di sini agar tidak double dengan pesan Prolog / Bab!
     await client.send_message(
         chat_id,
         f"🎯 <b>GILIRAN BERIKUTNYA</b>\n\n"
@@ -415,21 +450,21 @@ async def process_end_of_round(client, chat_id):
     ])
 
     prompt_round = (
-        f"Genre:{room['genre']}|Topik:{room['topic']}|Bab:{room['round_count']}\n"
-        f"Lalu:{recent_context}\n"
-        f"Tokoh:{tokoh_hp}\n"
+        f"Genre:{room['genre']}|Tema:{room['topic']}|Bab:{room['round_count']}\n"
+        f"Cerita Sebelumnya:\n{recent_context}\n"
+        f"Tokoh Pemain:{tokoh_hp}\n"
         f"Aksi Bab Ini:{combined_actions}\n"
         f"Arahan Alur: {pacing_cue}\n\n"
         f"Tugas:\n"
-        f"1. Tulis lanjutan novel 1 paragraf utuh (3-4 kalimat hidup sesuai genre {room['genre']}) yang merespons langsung ucapan/tindakan tokoh dan memicu interaksi baru.\n"
-        f"2. Hitung perubahan HP tiap tokoh jika ada benturan/bahaya/pemulihan (0 jika aman, negatif jika terluka, positif jika pulih).\n"
+        f"1. Tulis lanjutan novel 1 paragraf singkat (3 kalimat padat, bahasa Indonesia baku & rapi, tanpa typo) yang merespons langsung ucapan/tindakan tokoh dan memicu interaksi baru.\n"
+        f"2. Hitung perubahan HP tiap tokoh pemain jika ada benturan/bahaya/pemulihan (0 jika aman, negatif jika terluka, positif jika pulih).\n"
         f"Output JSON valid tanpa markdown:\n"
-        f'{{"n":"paragraf novel lengkap","h":{{"NamaTokoh":-15}}}}'
+        f'{{"n":"paragraf novel singkat dan rapi","h":{{"NamaTokoh":0}}}}'
     )
 
     try:
-        data = await generate_groq_json(prompt_round, max_tokens=550)
-        raw_narasi = data.get("n", "Suasana semakin intens saat langkah mereka memicu kejadian tak terduga.")
+        data = await generate_groq_json(prompt_round, max_tokens=450)
+        raw_narasi = clean_narrative_labels(data.get("n", "Suasana semakin intens saat langkah mereka memicu kejadian tak terduga."))
         narasi_baru = highlight_player_names(html.escape(raw_narasi), list(room["players"].values()))
 
         room["history"].append(html.escape(raw_narasi))
@@ -477,10 +512,10 @@ async def process_end_of_round(client, chat_id):
         if not alive_players:
             epilog_prompt = (
                 f"Genre:{room['genre']}|Akhir:{raw_narasi}\n"
-                f"Semua tokoh tumbang. Tulis epilog penutup novel 2 kalimat sesuai genre {room['genre']}."
+                f"Semua tokoh tumbang. Tulis epilog penutup novel 2 kalimat singkat dalam bahasa Indonesia yang rapi."
             )
             try:
-                epilog_raw = await generate_groq_narrative(epilog_prompt, max_tokens=200)
+                epilog_raw = await generate_groq_narrative(epilog_prompt, max_tokens=180)
                 epilog_text = highlight_player_names(html.escape(epilog_raw), list(room["players"].values()))
             except Exception:
                 epilog_text = "Tirai akhirnya tertutup atas perjalanan mereka hari ini, menyisakan kisah yang tak terlupakan."
@@ -681,10 +716,10 @@ async def handle_info_buttons(client, callback: CallbackQuery):
         rules_text = (
             f"📖 <b>ATURAN BERMAIN</b>\n\n"
             f"<blockquote>"
-            f"<b>1. Kebebasan Karakter</b>\n"
-            f"Tentukan sendiri sifat dan peran tokohmu—baik, netral, licik, maupun kocak—lewat dialog dan aksi.\n\n"
-            f"<b>2. Alur Dinamis AI</b>\n"
-            f"Setiap akhir ronde, AI melanjutkan cerita dan memunculkan pemicu interaksi baru sesuai pilihan kalian (bisa dimainkan solo maupun ramai-ramai).\n\n"
+            f"<b>1. Peran Sesuai Tema</b>\n"
+            f"Bot menyesuaikan peran tiap pemain berdasarkan jumlah tokoh yang bergabung dan judul tema yang diatur di Lobby.\n\n"
+            f"<b>2. Kebebasan Karakter</b>\n"
+            f"Tentukan sendiri sifat dan tindakan tokohmu—baik, netral, licik, maupun kocak—lewat dialog dan aksi.\n\n"
             f"<b>3. Status Rahasia & Timer</b>\n"
             f"Tiap tokoh mulai dengan <b>100 HP</b> (cek lewat tombol <b>❤️ Cek Status Saya</b>) dan memiliki waktu <b>3 menit</b> per giliran."
             f"</blockquote>"
@@ -709,7 +744,7 @@ async def handle_info_buttons(client, callback: CallbackQuery):
             f"• <code>/start_rp</code> — Buka Lobby cerita\n"
             f"• <code>/aksi</code> — Kirim dialog / aksi giliranmu\n"
             f"• <code>/nama</code> — Ganti nama tokoh\n"
-            f"• <code>/topik</code> — Ubah latar cerita\n"
+            f"• <code>/topik</code> — Ubah judul/tema cerita\n"
             f"• <code>/skip</code> — Lewati giliran aktif\n"
             f"• <code>/selesai_rp</code> — Tutup & rangkum kisah"
             f"</blockquote>"
@@ -727,8 +762,8 @@ async def handle_info_buttons(client, callback: CallbackQuery):
         rules_text = (
             f"📖 <b>ATURAN BERMAIN</b>\n\n"
             f"<blockquote>"
-            f"• <b>RP Bebas:</b> Tentukan sendiri sifat & tindakan tokohmu (bisa solo maupun ramai-ramai).\n"
-            f"• <b>Status Rahasia:</b> Tekan <b>❤️ Cek Status Saya</b> untuk melihat sisa HP pribadi.\n"
+            f"• <b>Peran Otomatis:</b> Menyesuaikan jumlah pemain & judul tema.\n"
+            f"• <b>Status Rahasia:</b> Tekan <b>❤️ Cek Status Saya</b> untuk melihat HP pribadi.\n"
             f"• <b>Timer:</b> Batas 3 menit per giliran (auto-skip).\n"
             f"• <b>Tamat:</b> Ketik <code>/selesai_rp</code> untuk arsip novel utuh."
             f"</blockquote>"
@@ -805,16 +840,16 @@ async def set_character_name(client, message: Message):
 async def set_topic(client, message: Message):
     room = get_room(message.chat.id)
     if room["status"] != "LOBBY":
-        await message.reply("⚠️ Topik cerita hanya bisa diubah saat masih di Lobby!")
+        await message.reply("⚠️ Tema cerita hanya bisa diubah saat masih di Lobby!")
         return
 
     if len(message.command) < 2:
-        await message.reply("Contoh: <code>/topik transmigrasi ke dalam tubuh antagonis akademi sihir</code>")
+        await message.reply("Contoh: <code>/topik aku dan rose</code> atau <code>/topik misteri di perpustakaan tua</code>")
         return
 
     new_topic = " ".join(message.command[1:])
     room["topic"] = new_topic
-    await message.reply(f"📌 <b>Topik Cerita:</b> <i>{html.escape(new_topic)}</i>")
+    await message.reply(f"📌 <b>Tema Cerita:</b> <i>{html.escape(new_topic)}</i>")
 
     if room["lobby_msg_id"]:
         try:
@@ -868,23 +903,25 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
         room["current_turn_index"] = 0
         room["round_count"] = 0
 
-        status_msg = await callback.message.edit_text("✒️ <i>Menulis bab pembuka kisah...</i>")
+        status_msg = await callback.message.edit_text("✒️ <i>Menentukan peran tokoh & menulis prolog cerita...</i>")
 
-        player_names = ", ".join(room["players"].values())
-        solo_note = (
-            "Karena hanya ada 1 tokoh pemain, hadirkan juga 1 karakter pendamping/lawan bicara menarik yang langsung berinteraksi dengannya."
-            if len(room["players"]) == 1 else ""
-        )
+        player_names_list = list(room["players"].values())
+        role_setup_rule = build_role_setup_instruction(player_names_list, room["topic"], room["genre"])
 
         prompt_pembuka = (
-            f"Tulis prolog novel lengkap 2 paragraf sesuai genre {room['genre']}. Topik:{room['topic']}|Tokoh:{player_names}.\n"
-            f"Paragraf 1 (3 kalimat): Awali dengan 'Selamat datang di dunia...', jelaskan suasana latar tempat, premis topik '{room['topic']}', serta posisi tiap tokoh di dalam cerita.\n"
-            f"Paragraf 2 (3 kalimat): Munculkan kejadian atau situasi mendesak di depan mata yang langsung memicu interaksi. {solo_note}"
+            f"Genre: {room['genre']}\n"
+            f"Judul/Tema Cerita: {room['topic']}\n"
+            f"{role_setup_rule}\n\n"
+            f"Tugas:\n"
+            f"Tulis prolog singkat dan mengalir (maksimal 2 paragraf pendek, masing-masing 2-3 kalimat saja) dalam bahasa Indonesia yang rapi tanpa typo.\n"
+            f"• Paragraf pertama memperkenalkan latar tempat serta peran masing-masing tokoh sesuai aturan peran di atas.\n"
+            f"• Paragraf kedua langsung memunculkan kejadian atau dialog awal yang memicu interaksi.\n"
+            f"Jangan menulis label 'Paragraf 1:' atau 'Paragraf 2:'."
         )
 
         try:
-            raw_text = await generate_groq_narrative(prompt_pembuka, max_tokens=600)
-            narasi_awal = highlight_player_names(html.escape(raw_text), list(room["players"].values()))
+            raw_text = await generate_groq_narrative(prompt_pembuka, max_tokens=420)
+            narasi_awal = highlight_player_names(html.escape(raw_text), player_names_list)
             room["history"].append(html.escape(raw_text))
             room["full_story"].append(html.escape(raw_text))
         except Exception as e:
@@ -900,7 +937,6 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
 
         await status_msg.delete()
 
-        # Tombol Status hanya dipasang 1x di Prolog & Bab Baru (tidak dobel di Giliran!)
         await callback.message.reply(
             f"📖 <b>PROLOG • {html.escape(room['genre'].upper())}</b>\n"
             f"📌 <i>{html.escape(room['topic'])}</i>\n\n"
@@ -909,7 +945,6 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
         )
         await prompt_next_turn(client, chat_id)
 
-# Handler perintah /aksi (dijamin 100% tembus meskipun Privacy Mode Bot ON!)
 @app.on_message(filters.command("aksi") & filters.group)
 async def handle_turn_command(client, message: Message):
     raw_arg = message.text.partition(" ")[2] if " " in message.text else ""
@@ -922,7 +957,6 @@ async def handle_turn_command(client, message: Message):
         return
     await process_submitted_turn(client, message, raw_arg)
 
-# Handler teks bebas langsung tanpa /aksi (jalan jika Privacy Mode Bot OFF / reply bot)
 @app.on_message(filters.group & filters.text & ~filters.regex(r"^/"))
 async def handle_turn_plain_text(client, message: Message):
     await process_submitted_turn(client, message, message.text)
@@ -962,14 +996,14 @@ async def stop_rp(client, message: Message):
         tokoh_str = ", ".join(room["players"].values())
 
         prompt_rekap = (
-            f"Genre:{room['genre']}|Topik:{room['topic']}|Tokoh:{tokoh_str}\n"
+            f"Genre:{room['genre']}|Tema:{room['topic']}|Tokoh:{tokoh_str}\n"
             f"Rangkaian Kejadian:\n{gabungan_bab}\n\n"
-            f"Tugas: Rangkum seluruh perjalanan cerita di atas dari awal hingga akhir menjadi 2 paragraf novel yang utuh, "
-            f"mengalir, dan ditutup dengan kalimat epilog yang berkesan."
+            f"Tugas: Rangkum seluruh perjalanan cerita di atas dari awal hingga akhir menjadi 2 paragraf singkat yang utuh, "
+            f"rapi dalam bahasa Indonesia baku, dan ditutup dengan kalimat epilog yang berkesan."
         )
 
         try:
-            rekap_raw = await generate_groq_narrative(prompt_rekap, max_tokens=600)
+            rekap_raw = await generate_groq_narrative(prompt_rekap, max_tokens=450)
             rekap_text = highlight_player_names(html.escape(rekap_raw), list(room["players"].values()))
         except Exception:
             rekap_text = f"{room['full_story'][0]}\n\n...\n\n{room['full_story'][-1]}"
@@ -997,7 +1031,7 @@ async def main():
             BotCommand("start_rp", "Buka lobby pendaftaran cerita RP"),
             BotCommand("aksi", "Kirim dialog / aksi giliranmu"),
             BotCommand("nama", "Ganti nama tokohmu di Lobby"),
-            BotCommand("topik", "Tentukan topik cerita di Lobby"),
+            BotCommand("topik", "Tentukan judul/tema cerita di Lobby"),
             BotCommand("skip", "Lewati giliran pemain aktif"),
             BotCommand("selesai_rp", "Akhiri sesi & rangkum kisah utuh")
         ],
@@ -1011,7 +1045,7 @@ async def main():
         scope=BotCommandScopeAllPrivateChats()
     )
 
-    print("Bot RP Novel aktif (/aksi + teks bebas, nama pemain bold, tombol status 1x, & Solo RP)!")
+    print("Bot RP Novel aktif (Model 70B Anti-Typo, Prolog Ringkas, & Peran Sesuai Tema/Jumlah Pemain)!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":

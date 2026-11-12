@@ -18,7 +18,6 @@ BOT_TOKEN = os.environ.get("TELEGRAM_API_KEY")
 if not all([GROQ_API_KEY, API_ID, API_HASH, BOT_TOKEN]):
     raise ValueError("Pastikan GROQ_API_KEY, TELEGRAM_API_ID, TELEGRAM_API_HASH, dan TELEGRAM_API_KEY sudah diisi di Railway!")
 
-# Init Client resmi Groq Cloud
 ai_client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY,
@@ -41,13 +40,6 @@ Tugasmu:
 4. Hanya sebut nama pemain yang terdaftar.
 """
 
-# ID Model Groq Resmi Teraktif & Paling Stabil
-GROQ_MODELS = [
-    "llama3-70b-8192",   # Llama 3 70B (Sangat Pintar & Imersif)
-    "llama3-8b-8192",    # Llama 3 8B (Super Kencang)
-    "mixtral-8x7b-32768" # Mixtral (Cadangan Handal)
-]
-
 # ---------------------------------------------------------
 # 2. STATE ROOM MEMORY
 # ---------------------------------------------------------
@@ -69,13 +61,31 @@ def get_room(chat_id):
     return rooms[chat_id]
 
 # ---------------------------------------------------------
-# 3. HELPER GROQ NARRATIVE GENERATOR WITH FALLBACK
+# 3. HELPER GROQ AUTO-MODEL DISCOVERY
 # ---------------------------------------------------------
+def get_active_groq_models():
+    """Mengambil daftar ID model teks yang aktif langsung dari endpoint Groq."""
+    try:
+        models_page = ai_client.models.list()
+        # Filter khusus model teks/chat (abaikan whisper/tts/guard)
+        excluded_keywords = ["whisper", "tts", "guard", "vision", "embedding", "compound"]
+        active_models = [
+            m.id for m in models_page.data
+            if not any(kw in m.id.lower() for kw in excluded_keywords)
+        ]
+        # Prioritaskan model besar (70b/versatile) di urutan pertama jika tersedia
+        active_models.sort(key=lambda x: (0 if "70b" in x or "versatile" in x else 1))
+        return active_models
+    except Exception as e:
+        print(f"Gagal mengambil daftar model Groq: {e}")
+        return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
 async def generate_groq_narrative(prompt, max_tokens=150):
     loop = asyncio.get_running_loop()
+    models_to_use = await loop.run_in_executor(None, get_active_groq_models)
     last_error = None
 
-    for model_name in GROQ_MODELS:
+    for model_name in models_to_use:
         try:
             completion = await loop.run_in_executor(
                 None,
@@ -94,11 +104,11 @@ async def generate_groq_narrative(prompt, max_tokens=150):
                 return content.strip()
         except Exception as e:
             last_error = e
-            print(f"Model {model_name} error ({e}), mencoba model cadangan...")
-            await asyncio.sleep(1)
+            print(f"Model {model_name} gagal ({e}), beralih ke model aktif berikutnya...")
+            await asyncio.sleep(0.5)
             continue
 
-    raise last_error or Exception("Semua model Groq sedang tidak merespons.")
+    raise last_error or Exception("Tidak ada model Groq aktif yang merespons.")
 
 # ---------------------------------------------------------
 # 4. HELPER FUNCTIONS & TURN MANAGER

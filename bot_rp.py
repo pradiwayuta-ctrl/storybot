@@ -4,6 +4,7 @@ import html
 import json
 import asyncio
 import random
+import unicodedata
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.types import (
@@ -44,9 +45,9 @@ app = Client(
 SYSTEM_INSTRUCTION = (
     "Kamu adalah penulis novel bahasa Indonesia yang rapi, natural, ringkas, dan menggunakan EYD yang benar. "
     "Tulis sudut pandang orang ketiga yang mengalir dan tidak bertele-tele. "
+    "Patuhi secara ketat gender setiap tokoh yang diberikan (jangan pernah tertukar antara laki-laki dan perempuan). "
     "Dilarang menulis label seperti 'Paragraf 1:' atau 'Paragraf 2:'. "
-    "Dilarang menyebut Game Master, pemain, ronde, HP, sistem, atau menyapa pembaca. "
-    "Gunakan tata bahasa Indonesia baku yang enak dibaca tanpa kata-kata aneh atau typo."
+    "Dilarang menyebut Game Master, pemain, ronde, HP, sistem, atau menyapa pembaca."
 )
 
 GENRE_LIST = {
@@ -73,6 +74,7 @@ def get_room(chat_id):
             "genre": "Fantasy",
             "topic": "Petualangan di dunia pedang dan sihir",
             "players": {},          # {actor_id: character_name}
+            "genders": {},          # {actor_id: "Cowok" | "Cewek"}
             "hp": {},               # {actor_id: int (0-100)}
             "turn_order": [],
             "current_turn_index": 0,
@@ -99,15 +101,24 @@ def get_actor_name(obj):
         return obj.sender_chat.title or "Tokoh"
     return "Tokoh"
 
+def normalize_plain_text(text):
+    """Mengubah huruf bergaya Unicode (misal 𝐊𝐞𝐞𝐧𝐚𝐧) menjadi huruf standar (Keenan) agar konsisten di narasi."""
+    return unicodedata.normalize("NFKC", text)
+
 def clean_narrative_labels(text):
-    """Membersihkan label 'Paragraf 1:' atau 'Paragraf 2:' jika AI masih memunculkannya."""
     cleaned = re.sub(r'(?i)\bparagraf\s*\d+\s*:\s*', '', text)
     return cleaned.strip()
 
 def highlight_player_names(escaped_text, player_names):
     """Menebalkan semua nama pemain di dalam alur cerita agar menonjol."""
     result = escaped_text
-    sorted_names = sorted(player_names, key=len, reverse=True)
+    variants = set()
+    for name in player_names:
+        if name:
+            variants.add(name)
+            variants.add(normalize_plain_text(name))
+
+    sorted_names = sorted(variants, key=len, reverse=True)
     for name in sorted_names:
         escaped_name = html.escape(name)
         if not escaped_name:
@@ -116,35 +127,50 @@ def highlight_player_names(escaped_text, player_names):
         result = pattern.sub(lambda m: f"<b>{m.group(0)}</b>", result)
     return result
 
-def build_role_setup_instruction(player_names_list, topic, genre):
-    """Menentukan peran pemain berdasarkan jumlah pemain dan tema/judul topik."""
-    count = len(player_names_list)
-    names_str = ", ".join(player_names_list)
+def format_players_with_gender(room, uid_list=None):
+    target_ids = uid_list if uid_list is not None else list(room["players"].keys())
+    parts = []
+    for uid in target_ids:
+        p_name = normalize_plain_text(room["players"][uid])
+        p_gender = room["genders"].get(uid, "Cowok")
+        gender_desc = "Laki-laki/Cowok" if p_gender == "Cowok" else "Perempuan/Cewek"
+        parts.append(f"{p_name} ({gender_desc})")
+    return ", ".join(parts)
+
+def build_role_setup_instruction(room):
+    """Menentukan peran pemain berdasarkan jumlah pemain, gender, dan tema/judul topik."""
+    uids = room["turn_order"]
+    count = len(uids)
+    topic = room["topic"]
+    genre = room["genre"]
+    detail_str = format_players_with_gender(room, uids)
 
     if count == 1:
-        solo_name = player_names_list[0]
+        uid = uids[0]
+        solo_name = normalize_plain_text(room["players"][uid])
+        solo_gender = room["genders"].get(uid, "Cowok")
+        gender_word = "pria/cowok" if solo_gender == "Cowok" else "wanita/cewek"
         return (
-            f"Jumlah pemain: 1 orang ({solo_name}). Tema/Judul cerita: '{topic}' (Genre: {genre}). "
-            f"Aturan peran: Jadikan {solo_name} sebagai tokoh utama ('aku' dalam judul tema tersebut). "
+            f"Jumlah pemain: 1 orang -> {detail_str}. Tema/Judul cerita: '{topic}' (Genre: {genre}). "
+            f"Aturan peran: Jadikan {solo_name} (seorang {gender_word}) sebagai tokoh utama dalam tema '{topic}'. "
             f"Jika di judul tema '{topic}' terdapat nama tokoh lain (misalnya 'Rose' pada 'aku dan rose'), "
             f"hadirkan tokoh tersebut sebagai karakter pendamping utama yang langsung berinteraksi dengan {solo_name}. "
-            f"Jika judul tema tidak menyebut nama lain, hadirkan 1 tokoh pendamping yang relevan dengan tema '{topic}'. "
-            f"Jangan memunculkan tokoh tambahan lain yang tidak perlu."
+            f"Jika judul tema tidak menyebut nama lain, hadirkan 1 tokoh pendamping yang relevan dengan tema '{topic}'."
         )
     elif count == 2:
-        p1, p2 = player_names_list[0], player_names_list[1]
+        u1, u2 = uids[0], uids[1]
+        n1 = normalize_plain_text(room["players"][u1])
+        n2 = normalize_plain_text(room["players"][u2])
         return (
-            f"Jumlah pemain: 2 orang ({p1} dan {p2}). Tema/Judul cerita: '{topic}' (Genre: {genre}). "
-            f"Aturan peran: Sesuaikan peran {p1} dan {p2} sebagai dua tokoh sentral dalam tema '{topic}' "
-            f"(misalnya jika tema 'aku dan rose', posisikan {p1} dan {p2} sebagai pasangan/dua tokoh utama dalam kisah tersebut). "
-            f"Fokus hanya pada {p1} dan {p2}, jangan menambah tokoh NPC baru kecuali sekadar figuran latar."
+            f"Jumlah pemain: 2 orang -> {detail_str}. Tema/Judul cerita: '{topic}' (Genre: {genre}). "
+            f"Aturan peran: Sesuaikan peran {n1} dan {n2} (patuhi gender masing-masing) sebagai dua tokoh sentral dalam tema '{topic}'. "
+            f"Fokus pada {n1} dan {n2}, jangan menambah tokoh baru yang tidak perlu."
         )
     else:
         return (
-            f"Jumlah pemain: {count} orang ({names_str}). Tema/Judul cerita: '{topic}' (Genre: {genre}). "
-            f"Aturan peran: Bagikan peran secara alami kepada semua {count} pemain tersebut di dalam satu latar cerita bertema '{topic}' "
-            f"sehingga setiap pemain punya posisi dan keterkaitan yang jelas satu sama lain. "
-            f"Jangan memunculkan tokoh tambahan di luar daftar pemain ({names_str})."
+            f"Jumlah pemain: {count} orang -> {detail_str}. Tema/Judul cerita: '{topic}' (Genre: {genre}). "
+            f"Aturan peran: Bagikan peran secara alami kepada semua {count} pemain tersebut sesuai gender masing-masing "
+            f"di dalam satu latar cerita bertema '{topic}' sehingga setiap pemain memiliki keterkaitan yang jelas."
         )
 
 def get_dynamic_pacing_cue(round_num, genre, is_solo=False):
@@ -181,10 +207,12 @@ def get_dynamic_pacing_cue(round_num, genre, is_solo=False):
 # ---------------------------------------------------------
 def build_lobby_text(room):
     if room["players"]:
-        players_lines = "\n".join(
-            f"  {idx}. <b>{html.escape(name)}</b>"
-            for idx, name in enumerate(room["players"].values(), start=1)
-        )
+        lines = []
+        for idx, (uid, name) in enumerate(room["players"].items(), start=1):
+            g = room["genders"].get(uid, "Cowok")
+            icon = "♂️" if g == "Cowok" else "♀️"
+            lines.append(f"  {idx}. <b>{html.escape(name)}</b> • {icon} {g}")
+        players_lines = "\n".join(lines)
     else:
         players_lines = "  <i>Belum ada tokoh bergabung</i>"
 
@@ -196,22 +224,23 @@ def build_lobby_text(room):
         f"<blockquote>{players_lines}</blockquote>\n"
         f"⚙️ <b>Pengaturan Cepat:</b>\n"
         f"• <code>/nama NamaBaru</code> — Ubah nama tokoh\n"
+        f"• <code>/gender cowok/cewek</code> — Ubah gender\n"
         f"• <code>/topik JudulTema</code> — Ubah tema cerita"
     )
 
 def build_lobby_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("⚔️ Join Game", callback_data="join_rp"),
-            InlineKeyboardButton("🚪 Leave", callback_data="leave_rp")
+            InlineKeyboardButton("♂️ Join (Cowok)", callback_data="join_cowok"),
+            InlineKeyboardButton("♀️ Join (Cewek)", callback_data="join_cewek")
         ],
         [
-            InlineKeyboardButton("🎭 Pilih Genre", callback_data="open_genre_menu"),
+            InlineKeyboardButton("🚪 Leave", callback_data="leave_rp"),
             InlineKeyboardButton("🎲 Acak Urutan", callback_data="shuffle_players")
         ],
         [
-            InlineKeyboardButton("📖 Aturan", callback_data="show_rules"),
-            InlineKeyboardButton("⚡ Panduan", callback_data="show_features")
+            InlineKeyboardButton("🎭 Pilih Genre", callback_data="open_genre_menu"),
+            InlineKeyboardButton("📖 Aturan & Panduan", callback_data="show_rules")
         ],
         [
             InlineKeyboardButton("🚀 Mulai Cerita", callback_data="start_story")
@@ -254,8 +283,8 @@ def build_private_home(first_name, bot_username):
         f"<b>🚀 Cara Memulai</b>\n\n"
         f"<b>1.</b> Masukkan bot ke grup & jadikan <b>Admin</b>\n"
         f"<b>2.</b> Ketik <code>/start_rp</code> untuk membuka Lobby\n"
-        f"<b>3.</b> Tekan <b>Join Game</b>, pilih genre & tema\n"
-        f"<b>4.</b> Tekan <b>Mulai Cerita</b> untuk bermain"
+        f"<b>3.</b> Pilih <b>♂️ Join (Cowok)</b> atau <b>♀️ Join (Cewek)</b>\n"
+        f"<b>4.</b> Atur genre & tema, lalu tekan <b>Mulai Cerita</b>"
         f"</blockquote>"
     )
     keyboard = InlineKeyboardMarkup([
@@ -297,7 +326,7 @@ def get_active_groq_models():
         print(f"Gagal mengambil daftar model Groq: {e}")
         return priority
 
-async def generate_groq_json(prompt, max_tokens=450):
+async def generate_groq_json(prompt, max_tokens=550):
     loop = asyncio.get_running_loop()
     models_to_use = await loop.run_in_executor(None, get_active_groq_models)
     last_error = None
@@ -328,35 +357,6 @@ async def generate_groq_json(prompt, max_tokens=450):
 
     raise last_error or Exception("Tidak ada model Groq aktif yang merespons.")
 
-async def generate_groq_narrative(prompt, max_tokens=450):
-    loop = asyncio.get_running_loop()
-    models_to_use = await loop.run_in_executor(None, get_active_groq_models)
-    last_error = None
-
-    for model_name in models_to_use:
-        try:
-            completion = await loop.run_in_executor(
-                None,
-                lambda m=model_name: ai_client.chat.completions.create(
-                    model=m,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_INSTRUCTION},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=max_tokens,
-                    temperature=0.65
-                )
-            )
-            content = completion.choices[0].message.content
-            if content and len(content.strip()) > 25:
-                return clean_narrative_labels(content.strip())
-        except Exception as e:
-            last_error = e
-            await asyncio.sleep(0.4)
-            continue
-
-    raise last_error or Exception("Tidak ada model Groq aktif yang merespons.")
-
 # ---------------------------------------------------------
 # 5. HELPER FUNCTIONS & TURN MANAGER
 # ---------------------------------------------------------
@@ -369,6 +369,7 @@ def reset_room_state(room):
     cancel_afk_timer(room)
     room["status"] = "IDLE"
     room["players"].clear()
+    room["genders"].clear()
     room["hp"].clear()
     room["turn_order"].clear()
     room["history"].clear()
@@ -384,7 +385,7 @@ async def start_afk_timer(client, chat_id, user_id, timeout=180):
         active_user_id = room["turn_order"][room["current_turn_index"]]
         if active_user_id == user_id:
             skipped_player_name = room["players"][user_id]
-            room["round_actions"].append(f"{skipped_player_name}: diam mengamati")
+            room["round_actions"].append(f"{normalize_plain_text(skipped_player_name)}: diam mengamati")
             await client.send_message(
                 chat_id,
                 f"⌛ <b>Waktu Habis</b> — Giliran <b>{html.escape(skipped_player_name)}</b> dilewati otomatis."
@@ -401,7 +402,7 @@ async def prompt_next_turn(client, chat_id):
         candidate_id = room["turn_order"][room["current_turn_index"]]
         if room["hp"].get(candidate_id, 100) <= 0:
             dead_name = room["players"][candidate_id]
-            room["round_actions"].append(f"{dead_name}: terkapar tak sadarkan diri")
+            room["round_actions"].append(f"{normalize_plain_text(dead_name)}: terkapar tak sadarkan diri")
             room["current_turn_index"] += 1
         else:
             break
@@ -444,26 +445,26 @@ async def process_end_of_round(client, chat_id):
 
     combined_actions = "; ".join(room["round_actions"])
     recent_context = "\n".join(room["history"][-2:])
-    tokoh_hp = ", ".join([
-        f"{room['players'][uid]}({room['hp'][uid]}HP)"
+    tokoh_detail = ", ".join([
+        f"{normalize_plain_text(room['players'][uid])}({room['genders'].get(uid, 'Cowok')}|{room['hp'][uid]}HP)"
         for uid in room["turn_order"]
     ])
 
     prompt_round = (
         f"Genre:{room['genre']}|Tema:{room['topic']}|Bab:{room['round_count']}\n"
         f"Cerita Sebelumnya:\n{recent_context}\n"
-        f"Tokoh Pemain:{tokoh_hp}\n"
+        f"Tokoh Pemain:{tokoh_detail}\n"
         f"Aksi Bab Ini:{combined_actions}\n"
         f"Arahan Alur: {pacing_cue}\n\n"
         f"Tugas:\n"
-        f"1. Tulis lanjutan novel 1 paragraf singkat (3 kalimat padat, bahasa Indonesia baku & rapi, tanpa typo) yang merespons langsung ucapan/tindakan tokoh dan memicu interaksi baru.\n"
+        f"1. Tulis lanjutan novel 1 paragraf singkat (3-4 kalimat padat, bahasa Indonesia baku & rapi, tanpa typo) yang merespons langsung ucapan/tindakan tokoh dan memicu interaksi baru. Patuhi gender setiap tokoh.\n"
         f"2. Hitung perubahan HP tiap tokoh pemain jika ada benturan/bahaya/pemulihan (0 jika aman, negatif jika terluka, positif jika pulih).\n"
         f"Output JSON valid tanpa markdown:\n"
         f'{{"n":"paragraf novel singkat dan rapi","h":{{"NamaTokoh":0}}}}'
     )
 
     try:
-        data = await generate_groq_json(prompt_round, max_tokens=450)
+        data = await generate_groq_json(prompt_round, max_tokens=550)
         raw_narasi = clean_narrative_labels(data.get("n", "Suasana semakin intens saat langkah mereka memicu kejadian tak terduga."))
         narasi_baru = highlight_player_names(html.escape(raw_narasi), list(room["players"].values()))
 
@@ -474,11 +475,15 @@ async def process_end_of_round(client, chat_id):
             room["history"] = room["history"][-4:]
 
         hp_updates = data.get("h", {})
-        name_to_id = {v.lower(): k for k, v in room["players"].items()}
+        name_to_id = {}
+        for uid, pname in room["players"].items():
+            name_to_id[pname.lower()] = uid
+            name_to_id[normalize_plain_text(pname).lower()] = uid
+
         fallen_names = []
 
         for p_name, diff_val in hp_updates.items():
-            uid = name_to_id.get(p_name.lower())
+            uid = name_to_id.get(normalize_plain_text(p_name).lower())
             if uid and uid in room["hp"]:
                 try:
                     hp_diff = int(diff_val)
@@ -512,10 +517,12 @@ async def process_end_of_round(client, chat_id):
         if not alive_players:
             epilog_prompt = (
                 f"Genre:{room['genre']}|Akhir:{raw_narasi}\n"
-                f"Semua tokoh tumbang. Tulis epilog penutup novel 2 kalimat singkat dalam bahasa Indonesia yang rapi."
+                f"Semua tokoh tumbang. Tulis epilog penutup novel 2 kalimat singkat dalam bahasa Indonesia yang rapi.\n"
+                f'Output JSON valid: {{"e":"epilog 2 kalimat"}}'
             )
             try:
-                epilog_raw = await generate_groq_narrative(epilog_prompt, max_tokens=180)
+                epilog_data = await generate_groq_json(epilog_prompt, max_tokens=220)
+                epilog_raw = epilog_data.get("e", "Tirai akhirnya tertutup atas perjalanan mereka hari ini.")
                 epilog_text = highlight_player_names(html.escape(epilog_raw), list(room["players"].values()))
             except Exception:
                 epilog_text = "Tirai akhirnya tertutup atas perjalanan mereka hari ini, menyisakan kisah yang tak terlupakan."
@@ -577,6 +584,7 @@ async def process_submitted_turn(client, message: Message, raw_input: str):
 
     cancel_afk_timer(room)
     player_name = room["players"][actor_id]
+    plain_player_name = normalize_plain_text(player_name)
 
     parsed_parts = []
     if dialogs:
@@ -584,7 +592,7 @@ async def process_submitted_turn(client, message: Message, raw_input: str):
     if actions:
         parsed_parts.append(f'({ " ".join(actions) })')
 
-    formatted_action = f"{player_name}: " + " ".join(parsed_parts)
+    formatted_action = f"{plain_player_name}: " + " ".join(parsed_parts)
     room["round_actions"].append(formatted_action)
 
     await message.reply(f"✅ <b>Aksi {html.escape(player_name)} tercatat.</b>", quote=True)
@@ -643,6 +651,7 @@ async def check_secret_status_popup(client, callback: CallbackQuery):
         return
 
     p_name = room["players"].get(user_id, "Tokoh")
+    p_gender = room["genders"].get(user_id, "Cowok")
     sisa_hp = room["hp"].get(user_id, 100)
 
     if sisa_hp >= 75:
@@ -656,7 +665,7 @@ async def check_secret_status_popup(client, callback: CallbackQuery):
 
     popup_text = (
         f"❤️ STATUS RAHASIA TOKOH\n\n"
-        f"• Tokoh   : {p_name}\n"
+        f"• Tokoh   : {p_name} ({p_gender})\n"
         f"• Nyawa   : {sisa_hp} / 100 HP\n"
         f"• Kondisi : {kondisi}"
     )
@@ -716,8 +725,8 @@ async def handle_info_buttons(client, callback: CallbackQuery):
         rules_text = (
             f"📖 <b>ATURAN BERMAIN</b>\n\n"
             f"<blockquote>"
-            f"<b>1. Peran Sesuai Tema</b>\n"
-            f"Bot menyesuaikan peran tiap pemain berdasarkan jumlah tokoh yang bergabung dan judul tema yang diatur di Lobby.\n\n"
+            f"<b>1. Identitas & Peran Tema</b>\n"
+            f"Pilih gender saat bergabung di Lobby. AI menyesuaikan peran tiap pemain berdasarkan gender, jumlah pemain, dan judul tema.\n\n"
             f"<b>2. Kebebasan Karakter</b>\n"
             f"Tentukan sendiri sifat dan tindakan tokohmu—baik, netral, licik, maupun kocak—lewat dialog dan aksi.\n\n"
             f"<b>3. Status Rahasia & Timer</b>\n"
@@ -744,6 +753,7 @@ async def handle_info_buttons(client, callback: CallbackQuery):
             f"• <code>/start_rp</code> — Buka Lobby cerita\n"
             f"• <code>/aksi</code> — Kirim dialog / aksi giliranmu\n"
             f"• <code>/nama</code> — Ganti nama tokoh\n"
+            f"• <code>/gender</code> — Ubah gender (cowok/cewek)\n"
             f"• <code>/topik</code> — Ubah judul/tema cerita\n"
             f"• <code>/skip</code> — Lewati giliran aktif\n"
             f"• <code>/selesai_rp</code> — Tutup & rangkum kisah"
@@ -760,34 +770,22 @@ async def handle_info_buttons(client, callback: CallbackQuery):
 
     elif data == "show_rules":
         rules_text = (
-            f"📖 <b>ATURAN BERMAIN</b>\n\n"
+            f"📖 <b>ATURAN & PANDUAN</b>\n\n"
             f"<blockquote>"
-            f"• <b>Peran Otomatis:</b> Menyesuaikan jumlah pemain & judul tema.\n"
-            f"• <b>Status Rahasia:</b> Tekan <b>❤️ Cek Status Saya</b> untuk melihat HP pribadi.\n"
-            f"• <b>Timer:</b> Batas 3 menit per giliran (auto-skip).\n"
-            f"• <b>Tamat:</b> Ketik <code>/selesai_rp</code> untuk arsip novel utuh."
-            f"</blockquote>"
-        )
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("← Kembali ke Lobby", callback_data="back_to_dashboard")]])
-        await callback.message.edit_text(rules_text, reply_markup=keyboard)
-
-    elif data == "show_features":
-        features_text = (
-            f"⚡ <b>PANDUAN GILIRAN & PERINTAH</b>\n\n"
-            f"<blockquote>"
-            f"<b>✍️ Format Menulis</b>\n"
+            f"<b>✍️ Format Menulis Giliran</b>\n"
             f"• Dialog : <code>/aksi \"Ucapan tokoh\"</code>\n"
             f"• Aksi   : <code>/aksi ;gerakan tokoh;</code>\n"
             f"• Gabung : <code>/aksi \"Awas!\" ;menghindar;</code>"
             f"</blockquote>\n"
             f"<blockquote>"
-            f"<b>🛠️ Perintah Cepat</b>\n"
-            f"• <code>/nama</code> • <code>/topik</code> • <code>/aksi</code>\n"
-            f"• <code>/skip</code> • <code>/selesai_rp</code>"
+            f"<b>📌 Info Permainan</b>\n"
+            f"• Pilih <b>♂️ Join (Cowok)</b> / <b>♀️ Join (Cewek)</b> di Lobby.\n"
+            f"• Tekan <b>❤️ Cek Status Saya</b> untuk cek HP pribadi.\n"
+            f"• Batas 3 menit per giliran • <code>/selesai_rp</code> untuk tamat."
             f"</blockquote>"
         )
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("← Kembali ke Lobby", callback_data="back_to_dashboard")]])
-        await callback.message.edit_text(features_text, reply_markup=keyboard)
+        await callback.message.edit_text(rules_text, reply_markup=keyboard)
 
     elif data == "back_to_dashboard":
         room = get_room(callback.message.chat.id)
@@ -809,7 +807,7 @@ async def set_character_name(client, message: Message):
         return
 
     if actor_id not in room["players"]:
-        await message.reply("⚠️ Tekan tombol <b>Join Game</b> dulu sebelum mengganti nama tokoh!")
+        await message.reply("⚠️ Tekan tombol <b>♂️ Join (Cowok)</b> atau <b>♀️ Join (Cewek)</b> dulu!")
         return
 
     if len(message.command) < 2:
@@ -818,12 +816,55 @@ async def set_character_name(client, message: Message):
 
     custom_name = " ".join(message.command[1:]).strip()[:20]
 
-    if any(existing.lower() == custom_name.lower() and uid != actor_id for uid, existing in room["players"].items()):
+    if any(normalize_plain_text(existing).lower() == normalize_plain_text(custom_name).lower() and uid != actor_id for uid, existing in room["players"].items()):
         await message.reply(f"⚠️ Nama <b>{html.escape(custom_name)}</b> sudah dipakai pemain lain. Pilih nama lain!")
         return
 
     room["players"][actor_id] = custom_name
     await message.reply(f"🪪 <b>Nama Tokoh:</b> <code>{html.escape(custom_name)}</code>", quote=True)
+
+    if room["lobby_msg_id"]:
+        try:
+            await client.edit_message_text(
+                message.chat.id,
+                room["lobby_msg_id"],
+                build_lobby_text(room),
+                reply_markup=build_lobby_keyboard()
+            )
+        except Exception:
+            pass
+
+@app.on_message(filters.command("gender") & filters.group)
+async def set_character_gender(client, message: Message):
+    actor_id = get_actor_id(message)
+    if not actor_id:
+        return
+
+    room = get_room(message.chat.id)
+    if room["status"] != "LOBBY":
+        await message.reply("⚠️ Gender hanya bisa diubah saat masih di Lobby!")
+        return
+
+    if actor_id not in room["players"]:
+        await message.reply("⚠️ Gabung ke Lobby dulu sebelum mengatur gender!")
+        return
+
+    if len(message.command) < 2:
+        await message.reply("Contoh: <code>/gender cowok</code> atau <code>/gender cewek</code>")
+        return
+
+    arg = message.command[1].lower()
+    if arg in ("cowok", "cwo", "laki", "pria", "male", "m"):
+        chosen = "Cowok"
+    elif arg in ("cewek", "cwe", "perempuan", "wanita", "female", "f"):
+        chosen = "Cewek"
+    else:
+        await message.reply("⚠️ Pilihan gender: <code>cowok</code> atau <code>cewek</code>")
+        return
+
+    room["genders"][actor_id] = chosen
+    icon = "♂️" if chosen == "Cowok" else "♀️"
+    await message.reply(f"{icon} <b>Gender Diubah:</b> {chosen}", quote=True)
 
     if room["lobby_msg_id"]:
         try:
@@ -844,7 +885,7 @@ async def set_topic(client, message: Message):
         return
 
     if len(message.command) < 2:
-        await message.reply("Contoh: <code>/topik aku dan rose</code> atau <code>/topik misteri di perpustakaan tua</code>")
+        await message.reply("Contoh: <code>/topik aku dan rose</code> atau <code>/topik transmigrasi antagonis</code>")
         return
 
     new_topic = " ".join(message.command[1:])
@@ -862,25 +903,35 @@ async def set_topic(client, message: Message):
         except Exception:
             pass
 
-@app.on_callback_query(filters.regex("^(join_rp|leave_rp|start_story)$"))
+@app.on_callback_query(filters.regex("^(join_cowok|join_cewek|leave_rp|start_story)$"))
 async def handle_lobby_buttons(client, callback: CallbackQuery):
     chat_id = callback.message.chat.id
     actor_id = get_actor_id(callback)
     actor_name = get_actor_name(callback)
     room = get_room(chat_id)
 
-    if callback.data == "join_rp":
+    if callback.data in ("join_cowok", "join_cewek"):
+        chosen_gender = "Cowok" if callback.data == "join_cowok" else "Cewek"
+        icon = "♂️" if chosen_gender == "Cowok" else "♀️"
+
         if actor_id not in room["players"]:
             room["players"][actor_id] = actor_name
+            room["genders"][actor_id] = chosen_gender
             room["hp"][actor_id] = 100
-            await callback.answer(f"{actor_name} bergabung!", show_alert=False)
+            await callback.answer(f"{actor_name} bergabung sebagai {chosen_gender}!", show_alert=False)
             await callback.message.edit_text(build_lobby_text(room), reply_markup=build_lobby_keyboard())
         else:
-            await callback.answer("Kamu sudah terdaftar di Lobby!", show_alert=False)
+            if room["genders"].get(actor_id) != chosen_gender:
+                room["genders"][actor_id] = chosen_gender
+                await callback.answer(f"{icon} Gender diubah menjadi {chosen_gender}!", show_alert=False)
+                await callback.message.edit_text(build_lobby_text(room), reply_markup=build_lobby_keyboard())
+            else:
+                await callback.answer(f"Kamu sudah terdaftar ({chosen_gender})!", show_alert=False)
 
     elif callback.data == "leave_rp":
         if actor_id in room["players"]:
             del room["players"][actor_id]
+            room["genders"].pop(actor_id, None)
             room["hp"].pop(actor_id, None)
             await callback.answer("Keluar dari Lobby.", show_alert=False)
             await callback.message.edit_text(build_lobby_text(room), reply_markup=build_lobby_keyboard())
@@ -905,23 +956,24 @@ async def handle_lobby_buttons(client, callback: CallbackQuery):
 
         status_msg = await callback.message.edit_text("✒️ <i>Menentukan peran tokoh & menulis prolog cerita...</i>")
 
-        player_names_list = list(room["players"].values())
-        role_setup_rule = build_role_setup_instruction(player_names_list, room["topic"], room["genre"])
+        role_setup_rule = build_role_setup_instruction(room)
 
         prompt_pembuka = (
             f"Genre: {room['genre']}\n"
             f"Judul/Tema Cerita: {room['topic']}\n"
             f"{role_setup_rule}\n\n"
             f"Tugas:\n"
-            f"Tulis prolog singkat dan mengalir (maksimal 2 paragraf pendek, masing-masing 2-3 kalimat saja) dalam bahasa Indonesia yang rapi tanpa typo.\n"
-            f"• Paragraf pertama memperkenalkan latar tempat serta peran masing-masing tokoh sesuai aturan peran di atas.\n"
+            f"Tulis prolog singkat dan mengalir (2 paragraf pendek, masing-masing 2-3 kalimat saja) dalam bahasa Indonesia baku yang rapi, tanpa typo, dan patuh pada gender masing-masing tokoh.\n"
+            f"• Paragraf pertama memperkenalkan latar tempat serta peran masing-masing tokoh sesuai aturan peran dan gendernya.\n"
             f"• Paragraf kedua langsung memunculkan kejadian atau dialog awal yang memicu interaksi.\n"
-            f"Jangan menulis label 'Paragraf 1:' atau 'Paragraf 2:'."
+            f'Output JSON valid tanpa markdown (pisahkan dua paragraf dengan \\n\\n):\n'
+            f'{{"p":"paragraf pertama\\n\\nparagraf kedua"}}'
         )
 
         try:
-            raw_text = await generate_groq_narrative(prompt_pembuka, max_tokens=420)
-            narasi_awal = highlight_player_names(html.escape(raw_text), player_names_list)
+            data = await generate_groq_json(prompt_pembuka, max_tokens=500)
+            raw_text = clean_narrative_labels(data.get("p", f"Kisah {room['topic']} pun dimulai."))
+            narasi_awal = highlight_player_names(html.escape(raw_text), list(room["players"].values()))
             room["history"].append(html.escape(raw_text))
             room["full_story"].append(html.escape(raw_text))
         except Exception as e:
@@ -974,7 +1026,7 @@ async def skip_turn(client, message: Message):
     active_user_id = room["turn_order"][room["current_turn_index"]]
     skipped_player_name = room["players"][active_user_id]
 
-    room["round_actions"].append(f"{skipped_player_name}: menahan diri dan mengamati")
+    room["round_actions"].append(f"{normalize_plain_text(skipped_player_name)}: menahan diri dan mengamati")
     await message.reply(f"⏭️ Giliran <b>{html.escape(skipped_player_name)}</b> dilewati.")
 
     room["current_turn_index"] += 1
@@ -993,17 +1045,20 @@ async def stop_rp(client, message: Message):
         status_msg = await message.reply("📜 <i>Merangkai seluruh bab menjadi kisah novel yang utuh...</i>")
 
         gabungan_bab = "\n\n".join(room["full_story"])[-3000:]
-        tokoh_str = ", ".join(room["players"].values())
+        tokoh_detail = format_players_with_gender(room, room["turn_order"])
 
         prompt_rekap = (
-            f"Genre:{room['genre']}|Tema:{room['topic']}|Tokoh:{tokoh_str}\n"
+            f"Genre:{room['genre']}|Tema:{room['topic']}|Tokoh:{tokoh_detail}\n"
             f"Rangkaian Kejadian:\n{gabungan_bab}\n\n"
             f"Tugas: Rangkum seluruh perjalanan cerita di atas dari awal hingga akhir menjadi 2 paragraf singkat yang utuh, "
-            f"rapi dalam bahasa Indonesia baku, dan ditutup dengan kalimat epilog yang berkesan."
+            f"rapi dalam bahasa Indonesia baku (patuhi gender tiap tokoh), dan ditutup dengan kalimat epilog yang berkesan.\n"
+            f'Output JSON valid tanpa markdown (pisahkan paragraf dengan \\n\\n):\n'
+            f'{{"r":"paragraf satu\\n\\nparagraf dua"}}'
         )
 
         try:
-            rekap_raw = await generate_groq_narrative(prompt_rekap, max_tokens=450)
+            rekap_data = await generate_groq_json(prompt_rekap, max_tokens=550)
+            rekap_raw = clean_narrative_labels(rekap_data.get("r", ""))
             rekap_text = highlight_player_names(html.escape(rekap_raw), list(room["players"].values()))
         except Exception:
             rekap_text = f"{room['full_story'][0]}\n\n...\n\n{room['full_story'][-1]}"
@@ -1031,6 +1086,7 @@ async def main():
             BotCommand("start_rp", "Buka lobby pendaftaran cerita RP"),
             BotCommand("aksi", "Kirim dialog / aksi giliranmu"),
             BotCommand("nama", "Ganti nama tokohmu di Lobby"),
+            BotCommand("gender", "Ubah gender tokoh (cowok/cewek) di Lobby"),
             BotCommand("topik", "Tentukan judul/tema cerita di Lobby"),
             BotCommand("skip", "Lewati giliran pemain aktif"),
             BotCommand("selesai_rp", "Akhiri sesi & rangkum kisah utuh")
@@ -1045,7 +1101,7 @@ async def main():
         scope=BotCommandScopeAllPrivateChats()
     )
 
-    print("Bot RP Novel aktif (Model 70B Anti-Typo, Prolog Ringkas, & Peran Sesuai Tema/Jumlah Pemain)!")
+    print("Bot RP Novel aktif (Fitur Gender per Player di Lobby + Prolog JSON Rapi)!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
